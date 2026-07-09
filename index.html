@@ -1,0 +1,1314 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>PSP automatisé — Cellance</title>
+<link href="https://fonts.googleapis.com/css2?family=Open+Sans:ital,wght@0,300;0,400;0,600;0,700;1,400&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.22.20/babel.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+:root{
+  --ce-vert-tres-fonce:#1C3A35; --ce-vert-fonce:#264E46; --ce-vert-principal:#009261;
+  --ce-vert-clair:#58D88B; --ce-vert-pastel:#CDF3DC; --ce-vert-tres-clair:#E6F4EF;
+  --ce-saumon:#FAEFE2; --ce-rose:#F8C6BA; --ce-corail:#FF8364; --ce-blanc:#FFFFFF;
+  --ce-font:'Open Sans','Aptos','Calibri',sans-serif;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;background:var(--ce-vert-tres-clair);font-family:var(--ce-font);color:var(--ce-vert-tres-fonce);}
+::-webkit-scrollbar{width:10px;height:10px;}
+::-webkit-scrollbar-track{background:var(--ce-vert-tres-clair);}
+::-webkit-scrollbar-thumb{background:var(--ce-vert-pastel);border-radius:6px;}
+::-webkit-scrollbar-thumb:hover{background:var(--ce-vert-clair);}
+
+.ce-header{background:var(--ce-vert-tres-fonce);padding:12px 24px;display:flex;align-items:center;gap:16px;position:sticky;top:0;z-index:40;box-shadow:0 2px 8px rgba(0,0,0,.15);}
+.ce-header img{height:30px;}
+.ce-header-title{color:#fff;font-size:.95rem;font-weight:300;line-height:1.2;}
+.ce-header-title b{font-weight:700;color:var(--ce-vert-clair);}
+
+.ce-btn{background:var(--ce-vert-principal);color:#fff;border:none;padding:8px 18px;border-radius:6px;font-family:var(--ce-font);font-weight:600;cursor:pointer;font-size:.82rem;transition:background .15s;}
+.ce-btn:hover{background:var(--ce-vert-fonce);}
+.ce-btn:disabled{opacity:.45;cursor:not-allowed;}
+.ce-btn-outline{background:transparent;color:var(--ce-vert-principal);border:1.5px solid var(--ce-vert-principal);padding:7px 16px;border-radius:6px;font-family:var(--ce-font);cursor:pointer;font-size:.82rem;font-weight:600;transition:all .15s;}
+.ce-btn-outline:hover{background:var(--ce-vert-tres-clair);}
+.ce-btn-corail{background:var(--ce-corail);color:#fff;border:none;padding:7px 16px;border-radius:6px;font-family:var(--ce-font);cursor:pointer;font-size:.82rem;font-weight:600;}
+.ce-btn-corail:hover{opacity:.88;}
+.ce-btn-sm{padding:4px 10px;font-size:.72rem;border-radius:5px;}
+
+.ce-card{background:#fff;border-radius:10px;padding:18px 20px;box-shadow:0 1px 3px rgba(28,58,53,.08);border:1px solid #eef4f2;}
+.ce-badge{display:inline-block;background:var(--ce-vert-clair);color:var(--ce-vert-tres-fonce);padding:2px 10px;border-radius:20px;font-size:.68rem;font-weight:700;letter-spacing:.02em;}
+.ce-badge-corail{background:var(--ce-corail);color:#fff;}
+.ce-badge-outline{background:transparent;border:1.5px solid var(--ce-vert-principal);color:var(--ce-vert-principal);}
+
+.ce-tab{padding:10px 16px;font-size:.82rem;font-weight:600;color:var(--ce-vert-fonce);cursor:pointer;border-bottom:3px solid transparent;white-space:nowrap;transition:all .12s;}
+.ce-tab:hover{color:var(--ce-vert-principal);}
+.ce-tab.active{color:var(--ce-vert-principal);border-bottom-color:var(--ce-vert-principal);}
+.ce-tab.disabled{color:#b7c9c4;cursor:not-allowed;}
+
+.ce-input, .ce-select{border:1.5px solid #dfeae6;border-radius:6px;padding:6px 10px;font-family:var(--ce-font);font-size:.8rem;background:#fff;color:var(--ce-vert-tres-fonce);}
+.ce-input:focus, .ce-select:focus{outline:none;border-color:var(--ce-vert-principal);}
+
+table.ce-table{width:100%;border-collapse:collapse;font-size:.78rem;}
+table.ce-table thead th{position:sticky;top:0;background:var(--ce-vert-tres-clair);color:var(--ce-vert-tres-fonce);text-align:left;padding:8px 10px;font-weight:700;font-size:.7rem;text-transform:uppercase;letter-spacing:.03em;border-bottom:2px solid var(--ce-vert-pastel);cursor:pointer;user-select:none;}
+table.ce-table tbody td{padding:7px 10px;border-bottom:1px solid #f0f5f3;}
+table.ce-table tbody tr:hover{background:var(--ce-vert-tres-clair);cursor:pointer;}
+
+.dpe-badge{display:inline-flex;align-items:center;justify-content:center;width:24px;height:20px;border-radius:4px;font-weight:800;font-size:.72rem;color:#1C3A35;}
+
+.sim-banner{background:linear-gradient(90deg,var(--ce-corail),#ffab8f);color:#fff;padding:8px 20px;font-size:.78rem;font-weight:700;display:flex;align-items:center;justify-content:space-between;position:sticky;top:56px;z-index:35;}
+
+.drawer-overlay{position:fixed;inset:0;background:rgba(28,58,53,.45);z-index:50;}
+.drawer{position:fixed;top:0;right:0;bottom:0;width:min(560px,92vw);background:#fff;z-index:51;box-shadow:-8px 0 30px rgba(0,0,0,.2);overflow-y:auto;}
+
+.spinner{width:34px;height:34px;border:4px solid var(--ce-vert-pastel);border-top-color:var(--ce-vert-principal);border-radius:50%;animation:spin .8s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg);}}
+
+.dropzone{border:2.5px dashed var(--ce-vert-clair);border-radius:14px;background:#fff;transition:all .15s;}
+.dropzone.drag{border-color:var(--ce-vert-principal);background:var(--ce-vert-tres-clair);}
+
+.crit-bar-track{background:var(--ce-vert-tres-clair);border-radius:4px;height:8px;overflow:hidden;}
+.crit-bar-fill{background:var(--ce-vert-principal);height:100%;border-radius:4px;}
+
+.ce-footer{background:var(--ce-vert-tres-fonce);color:var(--ce-vert-pastel);text-align:center;padding:14px;font-size:.68rem;font-weight:300;}
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script>
+(function(){
+  var missing = [];
+  if (typeof React==='undefined') missing.push('React');
+  if (typeof ReactDOM==='undefined') missing.push('ReactDOM');
+  if (typeof Babel==='undefined') missing.push('Babel');
+  if (missing.length){
+    document.getElementById('root').innerHTML =
+      '<div style="min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;font-family:sans-serif;">' +
+      '<div style="max-width:520px;background:#fff;border:1px solid #F8C6BA;border-radius:10px;padding:24px;">' +
+      '<h1 style="color:#FF8364;font-size:1.1rem;margin-bottom:10px;">Chargement incomplet</h1>' +
+      '<p style="font-size:.85rem;color:#1C3A35;line-height:1.6;">Les bibliothèques suivantes n\u2019ont pas pu être chargées depuis leur CDN : <b>' + missing.join(', ') + '</b>. ' +
+      'L\u2019outil ne peut pas fonctionner sans elles. Vérifiez votre connexion Internet, ou que votre réseau ' +
+      '(proxy / pare-feu d\u2019entreprise) autorise l\u2019accès à <code>cdnjs.cloudflare.com</code>, puis rechargez cette page.</p></div></div>';
+  }
+})();
+</script>
+<script id="engine-source">
+/* =========================================================================
+   MOTEUR DE PARSING PSP — lecture des fichiers Excel côté client (SheetJS)
+   Aucune donnée n'est transmise à un serveur : tout le traitement a lieu
+   dans le navigateur. Le mapping est construit par détection de colonnes
+   (recherche du nom d'en-tête), pas par position fixe, afin de rester
+   robuste aux variations d'un fichier bailleur à l'autre (cf. cahier des
+   charges §11 — variabilité des fichiers clients réels).
+   ========================================================================= */
+
+function ceStripAccents(s){ return String(s).normalize('NFD').replace(/[\u0300-\u036f]/g,''); }
+function ceNorm(s){
+  if (s===null||s===undefined) return '';
+  return ceStripAccents(String(s)).toLowerCase().replace(/[°''']/g,'').trim().replace(/\s+/g,' ');
+}
+function sheetToMatrix(ws){ return XLSX.utils.sheet_to_json(ws, {header:1, raw:true, defval:null}); }
+function findHeaderRow(matrix, testFn, maxScan){
+  const lim = Math.min(maxScan||25, matrix.length);
+  for (let r=0;r<lim;r++){ if (testFn(matrix[r]||[])) return r; }
+  return -1;
+}
+function findColIndex(headerRow, patterns){
+  for (const p of patterns){ for (let i=0;i<headerRow.length;i++){ if (p.test(ceNorm(headerRow[i]))) return i; } }
+  return -1;
+}
+function findAllColIndices(headerRow, pattern){
+  const out=[]; for (let i=0;i<headerRow.length;i++){ if (pattern.test(ceNorm(headerRow[i]))) out.push(i); } return out;
+}
+function findSheet(sheetNames, pattern){ return sheetNames.find((n)=>pattern.test(ceNorm(n))); }
+
+function parseBaseCotation(matrix){
+  const headerRowIdx = findHeaderRow(matrix, (row)=>row.some((c)=>ceNorm(c)==='code de residence'));
+  if (headerRowIdx===-1) return null;
+  const header = matrix[headerRowIdx];
+  const codeCol = findColIndex(header,[/^code de residence$/]);
+  const dataRows = matrix.slice(headerRowIdx+1).filter((r)=>r && r[codeCol]!==null && r[codeCol]!==undefined && r[codeCol]!=='');
+
+  const idx = {
+    code: codeCol,
+    nom: findColIndex(header,[/^nom residence$/,/^nom du groupe$/]),
+    adresse: findColIndex(header,[/^adresse$/,/compilation adresse/]),
+    commune: findColIndex(header,[/^commune$/]),
+    secteur: findColIndex(header,[/^secteur$/]),
+    agence: findColIndex(header,[/^agence$/]),
+    codePostal: findColIndex(header,[/^code postal$/]),
+    qpv: findColIndex(header,[/qpv/]),
+    nbLgt: findColIndex(header,[/^nb lgt ou eq/, /^nb lgts? \(/, /^nb lgts?$/]),
+    dpeEnergie: findColIndex(header,[/^dpe energie$/, /^etiquette dpe energie/]),
+    dpeGES: findColIndex(header,[/^dpe ges$/, /^etiquette dpe ges/]),
+    attractivite: findColIndex(header,[/^note attractivite globale$/, /^note attractivite totale/, /^note de service rendu/]),
+    technique: findColIndex(header,[/^moyenne - technique$/, /^note technique globale$/, /^note etat technique$/]),
+    familleAttract: findColIndex(header,[/^famille attractivite$/]),
+    familleTechnique: findColIndex(header,[/^famille etat technique$/]),
+  };
+  const typoCols = {};
+  ['T1','T2','T3','T4','T5','T6+'].forEach((t)=>{ typoCols[t]=findColIndex(header,[new RegExp('^'+t.toLowerCase().replace('+','\\+')+'$')]); });
+
+  const distRuns=[];
+  for (let i=0;i<header.length-7;i++){
+    const seq = header.slice(i,i+8).map(ceNorm);
+    if (seq[0]==='a'&&seq[1]==='b'&&seq[2]==='c'&&seq[3]==='d'&&seq[4]==='e'&&seq[5]==='f'&&seq[6]==='g'&&seq[7]==='nr') distRuns.push(i);
+  }
+
+  const typeColIdxs = findAllColIndices(header,/^type de travaux$/);
+  const opBlocks = typeColIdxs.map((start,bi)=>{
+    const nextStart = typeColIdxs[bi+1]!==undefined? typeColIdxs[bi+1] : Math.min(header.length, start+12);
+    const span={};
+    for (let c=start;c<nextStart;c++){ const key=ceNorm(header[c]); if(key) span[key]=c; }
+    let anneeIdx=-1, statut='programme';
+    for (const k in span){ if (/^annee os travaux previsionnelle$/.test(k)){ anneeIdx=span[k]; statut='identifie'; break; } }
+    if (anneeIdx===-1){ for (const k in span){ if (/^annee d.?os$/.test(k)){ anneeIdx=span[k]; statut='programme'; break; } } }
+    let montantIdx=-1;
+    for (const k in span){ if (/^cout de revient ttc$/.test(k)){ montantIdx=span[k]; break; } }
+    if (montantIdx===-1){ for (const k in span){ if (/^montant total en ttc$/.test(k)){ montantIdx=span[k]; break; } } }
+    let logIdx=-1;
+    for (const k in span){ if (/^logements concernes$/.test(k)){ logIdx=span[k]; break; } }
+    return { typeIdx:start, anneeIdx, montantIdx, logIdx, statut };
+  });
+
+  const residences = dataRows.map((row)=>{
+    const res = {
+      code: row[idx.code], nom: idx.nom>=0? row[idx.nom]:null, adresse: idx.adresse>=0? row[idx.adresse]:null,
+      commune: idx.commune>=0? row[idx.commune]:null, secteur: idx.secteur>=0? row[idx.secteur]:null,
+      agence: idx.agence>=0? row[idx.agence]:null, codePostal: idx.codePostal>=0? row[idx.codePostal]:null,
+      qpv: idx.qpv>=0? row[idx.qpv]:null,
+      nbLgt: idx.nbLgt>=0? (Number(row[idx.nbLgt])||0):0,
+      dpeEnergie: idx.dpeEnergie>=0? row[idx.dpeEnergie]:null, dpeGES: idx.dpeGES>=0? row[idx.dpeGES]:null,
+      attractivite: idx.attractivite>=0? Number(row[idx.attractivite]):null,
+      technique: idx.technique>=0? Number(row[idx.technique]):null,
+      familleAttract: idx.familleAttract>=0? row[idx.familleAttract]:null,
+      familleTechnique: idx.familleTechnique>=0? row[idx.familleTechnique]:null,
+    };
+    Object.keys(typoCols).forEach((t)=>{ res[t] = typoCols[t]>=0? (Number(row[typoCols[t]])||0):null; });
+    if (distRuns[0]!==undefined){ res.distEnergie={}; ['A','B','C','D','E','F','G','NR'].forEach((cl,i)=>{res.distEnergie[cl]=Number(row[distRuns[0]+i])||0;}); }
+    if (distRuns[1]!==undefined){ res.distGES={}; ['A','B','C','D','E','F','G','NR'].forEach((cl,i)=>{res.distGES[cl]=Number(row[distRuns[1]+i])||0;}); }
+    if (!res.commune && res.adresse){
+      const m = String(res.adresse).match(/(\d{5})\s+([A-ZÀ-ÖØ-Þ' -]{3,})\s*$/);
+      if (m) res.commune = m[2].trim();
+    }
+    if (!res.nom) res.nom = res.adresse ? String(res.adresse).slice(0,40) : ('Résidence '+res.code);
+    return res;
+  });
+
+  let opId=0;
+  const operations=[];
+  dataRows.forEach((row)=>{
+    const code = row[idx.code];
+    opBlocks.forEach((b)=>{
+      const type = row[b.typeIdx];
+      if (type!==null && type!==undefined && String(type).trim()!==''){
+        operations.push({
+          id:'op'+(opId++), resCode:code, type:String(type).trim(), statut:b.statut,
+          annee: b.anneeIdx>=0? (Number(row[b.anneeIdx])||null):null,
+          montant: b.montantIdx>=0? (Number(row[b.montantIdx])||0):0,
+          logements: b.logIdx>=0? (Number(row[b.logIdx])||null):null,
+          origine:'import',
+        });
+      }
+    });
+  });
+  return { headerRowIdx, idx, typoCols, distRuns, opBlocks, residences, operations, nbCols: header.length };
+}
+
+function parseGainsDPE(matrix){
+  const headerRowIdx = findHeaderRow(matrix, (row)=>row.some((c)=>ceNorm(c)==='energie'));
+  if (headerRowIdx===-1) return null;
+  const header = matrix[headerRowIdx];
+  const energieAnchor = header.findIndex((c)=>ceNorm(c)==='energie');
+  let gesAnchor=-1;
+  for (let i=energieAnchor+1;i<header.length;i++){ if (ceNorm(header[i])==='ges'){ gesAnchor=i; break; } }
+  const energieStart = energieAnchor+1, gesStart = gesAnchor+1;
+  const grid={};
+  for (let r=headerRowIdx+1;r<matrix.length;r++){
+    const row = matrix[r]||[]; const label=row[0];
+    if (!label || typeof label!=='string') continue;
+    const eVals=[]; for (let i=0;i<7;i++) eVals.push(row[energieStart+i]);
+    if (!eVals.some((v)=>typeof v==='number')) continue;
+    const gVals=[]; for (let i=0;i<7;i++) gVals.push(gesAnchor>=0? row[gesStart+i]: null);
+    grid[label.trim()] = {
+      energie:{A:eVals[0]||0,B:eVals[1]||0,C:eVals[2]||0,D:eVals[3]||0,E:eVals[4]||0,F:eVals[5]||0,G:eVals[6]||0},
+      ges:{A:gVals[0]||0,B:gVals[1]||0,C:gVals[2]||0,D:gVals[3]||0,E:gVals[4]||0,F:gVals[5]||0,G:gVals[6]||0},
+    };
+  }
+  return grid;
+}
+
+function findGroupHeaderRow(matrix){ return findHeaderRow(matrix,(row)=>row.some((c)=>/^n\s?groupe$/.test(ceNorm(c))),6); }
+function excelDateToYear(v){
+  if (v===null||v===undefined) return null;
+  if (typeof v==='number'){ const d=new Date(Date.UTC(1899,11,30)+v*86400000); return d.getUTCFullYear(); }
+  if (v instanceof Date) return v.getFullYear();
+  const m = String(v).match(/(\d{4})/); return m? Number(m[1]) : null;
+}
+function parseCessions(matrix){
+  const headerRowIdx = findGroupHeaderRow(matrix); if (headerRowIdx===-1) return [];
+  const header = matrix[headerRowIdx];
+  const groupeIdx = findColIndex(header,[/^n\s?groupe$/]); const nomIdx = findColIndex(header,[/^nom du groupe$/]);
+  const yearCols=[]; header.forEach((h,i)=>{ const m=ceNorm(h).match(/^nb logts\s*(\d{4})$/); if(m) yearCols.push({i,year:Number(m[1])}); });
+  const totalIdx = findColIndex(header,[/^nb de logts$/]);
+  const rows = matrix.slice(headerRowIdx+1).filter((r)=>r && r[groupeIdx]);
+  const entries=[];
+  rows.forEach((row)=>{
+    let any=false;
+    yearCols.forEach(({i,year})=>{ const v=Number(row[i])||0; if (v>0){ any=true; entries.push({groupe:row[groupeIdx], nom: nomIdx>=0?row[nomIdx]:null, annee:year, nbLogts:v}); } });
+    if (!any && totalIdx>=0 && Number(row[totalIdx])>0){ entries.push({groupe:row[groupeIdx], nom: nomIdx>=0?row[nomIdx]:null, annee:null, nbLogts:Number(row[totalIdx])}); }
+  });
+  return entries;
+}
+function parseDemolitions(matrix){
+  const headerRowIdx = findGroupHeaderRow(matrix); if (headerRowIdx===-1) return [];
+  const header = matrix[headerRowIdx];
+  const groupeIdx = findColIndex(header,[/^n\s?groupe$/]); const nomIdx = findColIndex(header,[/^nom du groupe$/]);
+  const dateOSIdx = findColIndex(header,[/date d.?os\s*de demolition/]); const nbLgtIdx = findColIndex(header,[/^nombre de logements$/]);
+  const rows = matrix.slice(headerRowIdx+1).filter((r)=>r && r[groupeIdx]);
+  return rows.map((row)=>({ groupe:row[groupeIdx], nom: nomIdx>=0?row[nomIdx]:null, annee: dateOSIdx>=0? excelDateToYear(row[dateOSIdx]):null, nbLogts: nbLgtIdx>=0? (Number(row[nbLgtIdx])||0):0 }));
+}
+function parseTravauxIdentifies(matrix){
+  const headerRowIdx = findGroupHeaderRow(matrix); if (headerRowIdx===-1) return [];
+  const header = matrix[headerRowIdx];
+  const groupeIdx = findColIndex(header,[/^n\s?groupe$/]); const nomIdx = findColIndex(header,[/^nom du groupe$/]);
+  const dateOSIdx = findColIndex(header,[/^date d.?ordre de service$/]); const montantIdx = findColIndex(header,[/^prix de revient de l.operation$/]);
+  const nbLgtIdx = findColIndex(header,[/^nombre de logements$/]);
+  const rows = matrix.slice(headerRowIdx+1).filter((r)=>r && r[groupeIdx]);
+  return rows.map((row)=>({ groupe:row[groupeIdx], nom: nomIdx>=0?row[nomIdx]:null, annee: dateOSIdx>=0? excelDateToYear(row[dateOSIdx]):null, montant: montantIdx>=0? (Number(row[montantIdx])||0):0, nbLogts: nbLgtIdx>=0? (Number(row[nbLgtIdx])||0):0 }));
+}
+
+/* ---- Cascade DPE (cahier des charges §8.2) ---- */
+const CLASS_ORDER = ['G','F','E','D','C','B','A'];
+function classIndex(c){ const i=CLASS_ORDER.indexOf(c); return i===-1? null : i; }
+function resolveGain(type, gainsGrid, metric){
+  const n2 = ceNorm(type);
+  if (/^demol/.test(n2)) return 'DEMOL';
+  if (gainsGrid[type]) return gainsGrid[type][metric];
+  for (const k in gainsGrid){ if (ceNorm(k)===n2) return gainsGrid[k][metric]; }
+  return null;
+}
+function computeTrajectory(residences, operations, gainsGrid, years, metric, includeIdentifiees){
+  const distKey = metric==='energie'? 'distEnergie':'distGES';
+  const state={}, alive={};
+  residences.forEach((r)=>{ state[r.code]=Object.assign({A:0,B:0,C:0,D:0,E:0,F:0,G:0,NR:0}, r[distKey]||{}); alive[r.code]=true; });
+  const opsByResYear={};
+  operations.forEach((o)=>{
+    if (!includeIdentifiees && o.statut==='identifie') return;
+    if (o.annee===null || o.annee===undefined) return;
+    if (!opsByResYear[o.resCode]) opsByResYear[o.resCode]={};
+    if (!opsByResYear[o.resCode][o.annee]) opsByResYear[o.resCode][o.annee]=[];
+    opsByResYear[o.resCode][o.annee].push(o);
+  });
+  const timeline={};
+  years.forEach((y)=>{
+    residences.forEach((r)=>{
+      if (!alive[r.code]) return;
+      const ops = (opsByResYear[r.code] && opsByResYear[r.code][y]) || [];
+      ops.forEach((o)=>{
+        const gain = resolveGain(o.type, gainsGrid, metric);
+        if (gain==='DEMOL'){ alive[r.code]=false; return; }
+        if (gain===null || gain===undefined) return;
+        const dist = state[r.code];
+        const next = {A:0,B:0,C:0,D:0,E:0,F:0,G:0,NR:dist.NR||0};
+        CLASS_ORDER.forEach((cl)=>{
+          const n = dist[cl]||0; if (n<=0) return;
+          const idx = classIndex(cl); const g = gain[cl]||0;
+          const newCl = CLASS_ORDER[Math.min(6, idx+g)];
+          next[newCl] = (next[newCl]||0) + n;
+        });
+        state[r.code]=next;
+      });
+    });
+    const agg={A:0,B:0,C:0,D:0,E:0,F:0,G:0,NR:0};
+    residences.forEach((r)=>{ if (alive[r.code]){ const d=state[r.code]; Object.keys(agg).forEach((cl)=>agg[cl]+=(d[cl]||0)); } });
+    timeline[y]=agg;
+  });
+  return timeline;
+}
+
+function familyOfType(type){
+  const n = ceNorm(type);
+  if (/^demol/.test(n)) return 'Démolition';
+  if (/^reha/.test(n)) return 'Réhabilitation';
+  if (/passage|vecteur|chgt de mode|chaudiere condensation/.test(n)) return 'Changement de vecteur';
+  if (n==='rc') return 'Remplacement de composants';
+  return 'Remplacement de composants';
+}
+</script>
+
+<script type="text/babel" data-presets="react,env">
+const {useState, useEffect, useMemo, useRef, useCallback} = React;
+
+const DPE_COLORS = {A:'#009261',B:'#58D88B',C:'#CDF3DC',D:'#FAEFE2',E:'#F8C6BA',F:'#FF8364',G:'#1C3A35',NR:'#9fb3ae'};
+const DPE_TEXT = {A:'#fff',B:'#1C3A35',C:'#1C3A35',D:'#1C3A35',E:'#1C3A35',F:'#fff',G:'#fff',NR:'#1C3A35'};
+const PALETTE = ['#009261','#FF8364','#264E46','#58D88B','#F8C6BA','#1C3A35','#CDF3DC'];
+
+function CeLogo(){
+  return (
+    <div style={{display:'flex',alignItems:'center',gap:10}}>
+      <div style={{width:34,height:34,borderRadius:'50%',background:'var(--ce-vert-principal)',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
+        <span style={{color:'#fff',fontWeight:800,fontSize:'.85rem',letterSpacing:'-0.02em'}}>ce</span>
+      </div>
+      <span style={{color:'#fff',fontWeight:700,fontSize:'1.05rem',letterSpacing:'.01em'}}>cellance</span>
+    </div>
+  );
+}
+
+function fmtNum(n){ if(n===null||n===undefined||isNaN(n)) return '—'; return new Intl.NumberFormat('fr-FR').format(Math.round(n)); }
+function fmtEur(n){ if(n===null||n===undefined||isNaN(n)) return '—'; return new Intl.NumberFormat('fr-FR',{maximumFractionDigits:0}).format(Math.round(n))+' €'; }
+function fmtKEur(n){ if(n===null||n===undefined||isNaN(n)) return '—'; return new Intl.NumberFormat('fr-FR',{maximumFractionDigits:0}).format(Math.round(n/1000))+' k€'; }
+
+function DpeBadge({cl}){
+  if (!cl) return <span className="dpe-badge" style={{background:'#eef4f2',color:'#9fb3ae'}}>?</span>;
+  const c = String(cl).toUpperCase();
+  return <span className="dpe-badge" style={{background:DPE_COLORS[c]||'#eef4f2', color:DPE_TEXT[c]||'#1C3A35'}}>{c}</span>;
+}
+
+function CritBar({label, value, max}){
+  const pct = max>0 ? Math.max(2,Math.min(100,(value/max)*100)) : 0;
+  return (
+    <div style={{marginBottom:8}}>
+      <div style={{display:'flex',justifyContent:'space-between',fontSize:'.72rem',color:'var(--ce-vert-fonce)',marginBottom:3}}>
+        <span>{label}</span><span style={{fontWeight:700}}>{typeof value==='number'? value.toFixed(1): (value ?? '—')}</span>
+      </div>
+      <div className="crit-bar-track"><div className="crit-bar-fill" style={{width:pct+'%'}}></div></div>
+    </div>
+  );
+}
+
+/* ---------------- Chart.js wrapper ---------------- */
+function ChartCanvas({type, data, options, height}){
+  const canvasRef = useRef(null);
+  const chartRef = useRef(null);
+  useEffect(()=>{
+    if (!canvasRef.current) return;
+    if (chartRef.current) chartRef.current.destroy();
+    chartRef.current = new Chart(canvasRef.current.getContext('2d'), {type, data, options: Object.assign({
+      responsive:true, maintainAspectRatio:false,
+      plugins:{legend:{labels:{font:{family:'Open Sans',size:11}, color:'#1C3A35'}}},
+    }, options||{})});
+    return ()=>{ if (chartRef.current) chartRef.current.destroy(); };
+  }, [JSON.stringify(data), JSON.stringify(options), type]);
+  return <div style={{height: height||280}}><canvas ref={canvasRef}></canvas></div>;
+}
+
+/* ---------------- Écran d'import ---------------- */
+function ImportScreen({onLoaded}){
+  const [drag, setDrag] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [loadingMsg, setLoadingMsg] = useState('Analyse du fichier en cours…');
+  const [error, setError] = useState(null);
+  const inputRef = useRef(null);
+  const workerRef = useRef(null);
+
+  useEffect(()=>()=>{ if (workerRef.current) workerRef.current.terminate(); }, []);
+
+  function buildWorkerSource(){
+    const engineSrc = document.getElementById('engine-source').textContent;
+    return [
+      "importScripts('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js');",
+      engineSrc,
+      "self.onmessage = function(ev){",
+      "  try {",
+      "    var wb = XLSX.read(ev.data.buffer, {type:'array', cellDates:false});",
+      "    var cotationSheetName = findSheet(wb.SheetNames, /base de cotation/);",
+      "    if (!cotationSheetName){ self.postMessage({ok:false, reason:'nosheet'}); return; }",
+      "    var cotation = parseBaseCotation(sheetToMatrix(wb.Sheets[cotationSheetName]));",
+      "    if (!cotation || cotation.residences.length===0){ self.postMessage({ok:false, reason:'noresidences'}); return; }",
+      "    var gainsSheetName = findSheet(wb.SheetNames, /referentiel des gains dpe/);",
+      "    var gainsGrid = gainsSheetName ? parseGainsDPE(sheetToMatrix(wb.Sheets[gainsSheetName])) : null;",
+      "    var cessionsSheetName = findSheet(wb.SheetNames, /cessions identifiees/);",
+      "    var demolSheetName = findSheet(wb.SheetNames, /demolitions identifiees/);",
+      "    var travauxSheetName = findSheet(wb.SheetNames, /travaux immo/);",
+      "    var cessions = cessionsSheetName ? parseCessions(sheetToMatrix(wb.Sheets[cessionsSheetName])) : [];",
+      "    var demolitions = demolSheetName ? parseDemolitions(sheetToMatrix(wb.Sheets[demolSheetName])) : [];",
+      "    var travauxIdentifies = travauxSheetName ? parseTravauxIdentifies(sheetToMatrix(wb.Sheets[travauxSheetName])) : [];",
+      "    var gabaritComplet = !!(cessionsSheetName && demolSheetName && travauxSheetName);",
+      "    self.postMessage({ ok:true, result:{",
+      "      nbOnglets: wb.SheetNames.length, nbCols: cotation.nbCols, gabaritComplet: gabaritComplet,",
+      "      residences: cotation.residences, operations: cotation.operations,",
+      "      gainsGrid: gainsGrid || {}, hasGainsGrid: !!gainsSheetName,",
+      "      actionsIdentifiees: { cessions: cessions, demolitions: demolitions, travauxIdentifies: travauxIdentifies, disponible: gabaritComplet }",
+      "    }});",
+      "  } catch(err){ self.postMessage({ok:false, reason:'exception', message: (err && err.message) || String(err)}); }",
+      "};",
+    ].join('\n');
+  }
+
+  function finishWithResult(fileName, result){
+    setLoading(false);
+    onLoaded(Object.assign({fileName}, result));
+  }
+
+  function failWith(reason, message){
+    setLoading(false);
+    if (reason==='nosheet') setError("Le fichier importé ne contient pas d'onglet « Base de cotation » reconnaissable. Import refusé : le socle minimal n'est pas présent.");
+    else if (reason==='noresidences') setError("L'onglet « Base de cotation » a été trouvé mais aucune résidence n'a pu être lue (colonne « Code de Résidence » introuvable ou onglet vide). Import refusé.");
+    else if (reason==='timeout') setError("L'analyse du fichier prend anormalement longtemps (plus de 2 minutes) et a été interrompue. Le fichier est peut-être trop volumineux ou corrompu.");
+    else setError("Erreur lors de la lecture du fichier" + (message? (' : '+message):'') + ". Vérifiez qu'il s'agit bien d'un fichier PSP au format Excel (.xlsx).");
+  }
+
+  function processFileMainThread(file, buffer){
+    // secours si les Web Workers sont indisponibles dans ce navigateur
+    try {
+      const wb = XLSX.read(buffer, {type:'array', cellDates:false});
+      const cotationSheetName = findSheet(wb.SheetNames, /base de cotation/);
+      if (!cotationSheetName) return failWith('nosheet');
+      const cotation = parseBaseCotation(sheetToMatrix(wb.Sheets[cotationSheetName]));
+      if (!cotation || cotation.residences.length===0) return failWith('noresidences');
+      const gainsSheetName = findSheet(wb.SheetNames, /referentiel des gains dpe/);
+      const gainsGrid = gainsSheetName ? parseGainsDPE(sheetToMatrix(wb.Sheets[gainsSheetName])) : null;
+      const cessionsSheetName = findSheet(wb.SheetNames, /cessions identifiees/);
+      const demolSheetName = findSheet(wb.SheetNames, /demolitions identifiees/);
+      const travauxSheetName = findSheet(wb.SheetNames, /travaux immo/);
+      const cessions = cessionsSheetName ? parseCessions(sheetToMatrix(wb.Sheets[cessionsSheetName])) : [];
+      const demolitions = demolSheetName ? parseDemolitions(sheetToMatrix(wb.Sheets[demolSheetName])) : [];
+      const travauxIdentifies = travauxSheetName ? parseTravauxIdentifies(sheetToMatrix(wb.Sheets[travauxSheetName])) : [];
+      const gabaritComplet = !!(cessionsSheetName && demolSheetName && travauxSheetName);
+      finishWithResult(file.name, {
+        nbOnglets: wb.SheetNames.length, nbCols: cotation.nbCols, gabaritComplet,
+        residences: cotation.residences, operations: cotation.operations,
+        gainsGrid: gainsGrid || {}, hasGainsGrid: !!gainsSheetName,
+        actionsIdentifiees: { cessions, demolitions, travauxIdentifies, disponible: gabaritComplet },
+      });
+    } catch (err){ failWith('exception', err.message); }
+  }
+
+  function processFile(file){
+    setError(null); setLoading(true); setLoadingMsg('Lecture du fichier…');
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const buffer = e.target.result;
+      if (typeof Worker === 'undefined'){
+        setLoadingMsg('Analyse du fichier en cours (mode compatibilité)…');
+        processFileMainThread(file, buffer);
+        return;
+      }
+      let worker;
+      try {
+        const blob = new Blob([buildWorkerSource()], {type:'application/javascript'});
+        worker = new Worker(URL.createObjectURL(blob));
+      } catch (err){
+        processFileMainThread(file, buffer);
+        return;
+      }
+      workerRef.current = worker;
+      setLoadingMsg('Analyse du fichier en cours… (peut prendre jusqu\u2019à une minute pour un fichier volumineux)');
+      const timeoutId = setTimeout(() => { worker.terminate(); failWith('timeout'); }, 120000);
+      worker.onmessage = (ev) => {
+        clearTimeout(timeoutId);
+        worker.terminate();
+        const msg = ev.data;
+        if (msg.ok) finishWithResult(file.name, msg.result);
+        else failWith(msg.reason, msg.message);
+      };
+      worker.onerror = () => {
+        clearTimeout(timeoutId);
+        worker.terminate();
+        // repli sur le thread principal si le worker plante (ex: importScripts bloqué par le réseau)
+        processFileMainThread(file, buffer);
+      };
+      worker.postMessage({buffer}, [buffer]);
+    };
+    reader.onerror = () => { setError("Impossible de lire ce fichier depuis le disque."); setLoading(false); };
+    reader.readAsArrayBuffer(file);
+  }
+
+  return (
+    <div style={{minHeight:'100vh',display:'flex',flexDirection:'column'}}>
+      <div className="ce-header"><CeLogo/><span className="ce-header-title">Outil interactif d'exploration du <b>PSP</b></span></div>
+      <div style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',padding:24}}>
+        <div style={{maxWidth:640,width:'100%'}}>
+          <h1 style={{color:'var(--ce-vert-principal)',fontSize:'1.6rem',fontWeight:700,marginBottom:6}}>Import du fichier PSP</h1>
+          <p style={{color:'var(--ce-vert-fonce)',fontSize:'.88rem',marginBottom:22,lineHeight:1.5}}>
+            Déposez un fichier PSP construit sur le gabarit Cellance (.xlsx). Le traitement est effectué
+            intégralement dans votre navigateur : aucune donnée n'est transmise à un serveur.
+          </p>
+          <div
+            className={"dropzone"+(drag?" drag":"")}
+            style={{padding:'48px 24px',textAlign:'center',cursor:'pointer'}}
+            onClick={()=>inputRef.current && inputRef.current.click()}
+            onDragOver={(e)=>{e.preventDefault();setDrag(true);}}
+            onDragLeave={()=>setDrag(false)}
+            onDrop={(e)=>{e.preventDefault();setDrag(false); const f=e.dataTransfer.files[0]; if(f) processFile(f);}}
+          >
+            {loading ? (
+              <div style={{display:'flex',flexDirection:'column',alignItems:'center',gap:14}}>
+                <div className="spinner"></div>
+                <span style={{color:'var(--ce-vert-fonce)',fontSize:'.85rem',textAlign:'center',maxWidth:280}}>{loadingMsg}</span>
+              </div>
+            ) : (
+              <React.Fragment>
+                <div style={{fontSize:'2.2rem',marginBottom:10}}>📂</div>
+                <div style={{fontWeight:700,color:'var(--ce-vert-tres-fonce)',marginBottom:4}}>Glissez-déposez votre fichier PSP ici</div>
+                <div style={{fontSize:'.78rem',color:'var(--ce-vert-fonce)'}}>ou cliquez pour sélectionner un fichier .xlsx</div>
+              </React.Fragment>
+            )}
+            <input ref={inputRef} type="file" accept=".xlsx" style={{display:'none'}} onChange={(e)=>{ const f=e.target.files[0]; if(f) processFile(f); }} />
+          </div>
+          {error && (
+            <div style={{marginTop:16,background:'var(--ce-rose)',border:'1px solid var(--ce-corail)',borderRadius:8,padding:'12px 16px',fontSize:'.8rem',color:'var(--ce-vert-tres-fonce)'}}>
+              <b>Import refusé.</b> {error}
+            </div>
+          )}
+          <div style={{marginTop:28,fontSize:'.72rem',color:'var(--ce-vert-fonce)',lineHeight:1.6}}>
+            <b>Contrôle de conformité :</b> l'import n'est bloqué que si l'onglet « Base de cotation » (socle)
+            est absent ou illisible. L'absence des onglets « Cessions / Démolitions / Travaux Immo. Identifiés »
+            (module optionnel) ou de la grille de gains DPE dégrade certaines vues sans bloquer l'import.
+          </div>
+        </div>
+      </div>
+      <div className="ce-footer">cellance — Document confidentiel — Traitement 100% local, aucune donnée transmise</div>
+    </div>
+  );
+}
+
+/* ---------------- Barre de filtres transverses ---------------- */
+function uniqueSorted(arr){ return Array.from(new Set(arr.filter((v)=>v!==null&&v!==undefined&&v!==''))).sort((a,b)=>String(a).localeCompare(String(b),'fr')); }
+
+function FilterBar({residences, filters, setFilters}){
+  const communes = useMemo(()=>uniqueSorted(residences.map((r)=>r.commune)), [residences]);
+  const secteurs = useMemo(()=>uniqueSorted(residences.map((r)=>r.secteur || r.agence)), [residences]);
+  const familles = useMemo(()=>uniqueSorted(residences.map((r)=>r.familleAttract)), [residences]);
+  const dpeClasses = ['A','B','C','D','E','F','G'];
+
+  const hasActive = filters.commune || filters.secteur || filters.famille || filters.dpe;
+  function reset(){ setFilters({commune:'',secteur:'',famille:'',dpe:''}); }
+
+  return (
+    <div style={{background:'#fff',borderBottom:'1px solid #e4ede9',padding:'8px 24px',display:'flex',gap:10,alignItems:'center',flexWrap:'wrap',position:'sticky',top:56,zIndex:30}}>
+      <span style={{fontSize:'.7rem',fontWeight:700,color:'var(--ce-vert-fonce)',textTransform:'uppercase',letterSpacing:'.03em'}}>Filtres</span>
+      {communes.length>0 && (
+        <select className="ce-select" value={filters.commune} onChange={(e)=>setFilters(Object.assign({},filters,{commune:e.target.value}))}>
+          <option value="">Commune (toutes)</option>
+          {communes.map((c)=><option key={c} value={c}>{c}</option>)}
+        </select>
+      )}
+      {secteurs.length>0 && (
+        <select className="ce-select" value={filters.secteur} onChange={(e)=>setFilters(Object.assign({},filters,{secteur:e.target.value}))}>
+          <option value="">Secteur / agence (tous)</option>
+          {secteurs.map((c)=><option key={c} value={c}>{c}</option>)}
+        </select>
+      )}
+      {familles.length>0 && (
+        <select className="ce-select" value={filters.famille} onChange={(e)=>setFilters(Object.assign({},filters,{famille:e.target.value}))}>
+          <option value="">Famille attractivité (toutes)</option>
+          {familles.map((c)=><option key={c} value={c}>Famille {c}</option>)}
+        </select>
+      )}
+      <select className="ce-select" value={filters.dpe} onChange={(e)=>setFilters(Object.assign({},filters,{dpe:e.target.value}))}>
+        <option value="">Classe DPE énergie (toutes)</option>
+        {dpeClasses.map((c)=><option key={c} value={c}>{c}</option>)}
+      </select>
+      {hasActive && <button className="ce-btn-outline ce-btn-sm" onClick={reset}>Réinitialiser</button>}
+    </div>
+  );
+}
+
+function applyFilters(residences, filters){
+  return residences.filter((r)=>{
+    if (filters.commune && r.commune!==filters.commune) return false;
+    if (filters.secteur && (r.secteur||r.agence)!==filters.secteur) return false;
+    if (filters.famille && r.familleAttract!==filters.famille) return false;
+    if (filters.dpe && r.dpeEnergie!==filters.dpe) return false;
+    return true;
+  });
+}
+
+/* ---------------- Navigation ---------------- */
+function Nav({active, setActive, hasActions}){
+  const tabs = [
+    {id:'ensemble', label:"Vue d'ensemble"},
+    {id:'cotation', label:'Base de cotation'},
+    {id:'invest', label:'Investissements & simulation'},
+    {id:'dpe', label:'Décarbonation & DPE'},
+    {id:'actions', label:'Actions identifiées', disabled: !hasActions},
+    {id:'carto', label:'Cartographie', disabled:true},
+  ];
+  return (
+    <div style={{background:'#fff',borderBottom:'2px solid #eef4f2',display:'flex',padding:'0 24px',overflowX:'auto'}}>
+      {tabs.map((t)=>(
+        <div key={t.id}
+          className={"ce-tab"+(active===t.id?" active":"")+(t.disabled?" disabled":"")}
+          title={t.disabled? (t.id==='carto' ? "Nécessite des coordonnées géographiques absentes du fichier importé — prévu en V2" : "Non disponible dans ce fichier"):""}
+          onClick={()=>{ if(!t.disabled) setActive(t.id); }}
+        >{t.label}</div>
+      ))}
+    </div>
+  );
+}
+
+/* ---------------- Vue d'ensemble ---------------- */
+function KpiCard({label, value, sub}){
+  return (
+    <div className="ce-card" style={{flex:1,minWidth:150}}>
+      <div style={{fontSize:'.68rem',fontWeight:700,color:'var(--ce-vert-fonce)',textTransform:'uppercase',letterSpacing:'.03em',marginBottom:6}}>{label}</div>
+      <div style={{fontSize:'1.7rem',fontWeight:700,color:'var(--ce-vert-principal)'}}>{value}</div>
+      {sub && <div style={{fontSize:'.72rem',color:'var(--ce-vert-fonce)',marginTop:2}}>{sub}</div>}
+    </div>
+  );
+}
+
+function ViewEnsemble({residences, operations, gabaritComplet}){
+  const totalLgt = residences.reduce((s,r)=>s+r.nbLgt,0);
+  const communesCount = uniqueSorted(residences.map((r)=>r.commune)).length;
+  const totalInvest = operations.reduce((s,o)=>s+(o.montant||0),0);
+
+  const topCommunes = useMemo(()=>{
+    const m = {};
+    residences.forEach((r)=>{ if(r.commune){ m[r.commune]=(m[r.commune]||0)+r.nbLgt; } });
+    return Object.entries(m).sort((a,b)=>b[1]-a[1]).slice(0,5);
+  }, [residences]);
+
+  const topSecteurs = useMemo(()=>{
+    const m = {};
+    residences.forEach((r)=>{ const k=r.secteur||r.agence; if(k){ m[k]=(m[k]||0)+r.nbLgt; } });
+    return Object.entries(m).sort((a,b)=>b[1]-a[1]).slice(0,5);
+  }, [residences]);
+
+  const typoTotals = useMemo(()=>{
+    const t = {T1:0,T2:0,T3:0,T4:0,T5:0,'T6+':0};
+    residences.forEach((r)=>{ Object.keys(t).forEach((k)=>{ t[k]+= (r[k]||0); }); });
+    return t;
+  }, [residences]);
+  const hasTypo = Object.values(typoTotals).some((v)=>v>0);
+
+  const dpeTotals = useMemo(()=>{
+    const t = {A:0,B:0,C:0,D:0,E:0,F:0,G:0,NR:0};
+    residences.forEach((r)=>{ if (r.distEnergie){ Object.keys(t).forEach((k)=>{ t[k]+=(r.distEnergie[k]||0); }); } });
+    return t;
+  }, [residences]);
+  const hasDpeDist = Object.values(dpeTotals).some((v)=>v>0);
+
+  return (
+    <div style={{padding:24,display:'flex',flexDirection:'column',gap:20}}>
+      <div style={{display:'flex',gap:16,flexWrap:'wrap'}}>
+        <KpiCard label="Logements" value={fmtNum(totalLgt)} />
+        <KpiCard label="Résidences" value={fmtNum(residences.length)} />
+        <KpiCard label="Communes" value={fmtNum(communesCount)} />
+        <KpiCard label="Budget investissements (import)" value={fmtKEur(totalInvest)} sub={operations.length+" opérations importées"} />
+        {!gabaritComplet && <KpiCard label="Gabarit" value="Réduit" sub="Actions identifiées non présentes" />}
+      </div>
+
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16}}>
+        {topCommunes.length>0 && (
+          <div className="ce-card">
+            <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700,marginBottom:12}}>Top 5 communes (logements)</h2>
+            <ChartCanvas type="bar" height={220} data={{
+              labels: topCommunes.map((c)=>c[0]),
+              datasets:[{label:'Logements', data:topCommunes.map((c)=>c[1]), backgroundColor:'#009261', borderRadius:4}]
+            }} options={{indexAxis:'y', plugins:{legend:{display:false}}, scales:{x:{beginAtZero:true}}}} />
+          </div>
+        )}
+        {topSecteurs.length>0 && (
+          <div className="ce-card">
+            <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700,marginBottom:12}}>Top 5 secteurs / agences (logements)</h2>
+            <ChartCanvas type="bar" height={220} data={{
+              labels: topSecteurs.map((c)=>c[0]),
+              datasets:[{label:'Logements', data:topSecteurs.map((c)=>c[1]), backgroundColor:'#FF8364', borderRadius:4}]
+            }} options={{indexAxis:'y', plugins:{legend:{display:false}}, scales:{x:{beginAtZero:true}}}} />
+          </div>
+        )}
+        {hasTypo && (
+          <div className="ce-card">
+            <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700,marginBottom:12}}>Répartition par typologie</h2>
+            <ChartCanvas type="doughnut" height={220} data={{
+              labels: Object.keys(typoTotals), datasets:[{data:Object.values(typoTotals), backgroundColor:PALETTE}]
+            }} />
+          </div>
+        )}
+        {hasDpeDist && (
+          <div className="ce-card">
+            <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700,marginBottom:12}}>Répartition DPE énergie (logements)</h2>
+            <ChartCanvas type="doughnut" height={220} data={{
+              labels: Object.keys(dpeTotals).filter(k=>dpeTotals[k]>0),
+              datasets:[{data:Object.keys(dpeTotals).filter(k=>dpeTotals[k]>0).map(k=>dpeTotals[k]), backgroundColor:Object.keys(dpeTotals).filter(k=>dpeTotals[k]>0).map(k=>DPE_COLORS[k])}]
+            }} />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Base de cotation ---------------- */
+function SortableTable({columns, rows, onRowClick, pageSize}){
+  const [sortCol, setSortCol] = useState(null);
+  const [sortDir, setSortDir] = useState(1);
+  const [page, setPage] = useState(0);
+  const size = pageSize || 20;
+
+  const sorted = useMemo(()=>{
+    if (!sortCol) return rows;
+    const copy = rows.slice();
+    copy.sort((a,b)=>{
+      const va=a[sortCol], vb=b[sortCol];
+      if (va===null||va===undefined) return 1; if (vb===null||vb===undefined) return -1;
+      if (typeof va==='number' && typeof vb==='number') return (va-vb)*sortDir;
+      return String(va).localeCompare(String(vb),'fr')*sortDir;
+    });
+    return copy;
+  }, [rows, sortCol, sortDir]);
+
+  useEffect(()=>{ setPage(0); }, [rows.length, sortCol, sortDir]);
+  const pageCount = Math.max(1, Math.ceil(sorted.length/size));
+  const pageRows = sorted.slice(page*size, page*size+size);
+
+  function toggleSort(key){ if (sortCol===key) setSortDir(sortDir*-1); else { setSortCol(key); setSortDir(1); } }
+
+  return (
+    <div>
+      <div style={{overflowX:'auto',maxHeight:480,overflowY:'auto',border:'1px solid #eef4f2',borderRadius:8}}>
+        <table className="ce-table">
+          <thead><tr>{columns.map((c)=>(
+            <th key={c.key} onClick={()=>toggleSort(c.key)}>{c.label}{sortCol===c.key? (sortDir>0?' ▲':' ▼'):''}</th>
+          ))}</tr></thead>
+          <tbody>
+            {pageRows.map((row,i)=>(
+              <tr key={i} onClick={()=>onRowClick && onRowClick(row)}>
+                {columns.map((c)=><td key={c.key}>{c.render? c.render(row): (row[c.key]??'—')}</td>)}
+              </tr>
+            ))}
+            {pageRows.length===0 && <tr><td colSpan={columns.length} style={{textAlign:'center',color:'#9fb3ae',padding:20}}>Aucun résultat pour ces filtres.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+      {pageCount>1 && (
+        <div style={{display:'flex',gap:8,alignItems:'center',justifyContent:'flex-end',marginTop:10,fontSize:'.75rem',color:'var(--ce-vert-fonce)'}}>
+          <button className="ce-btn-outline ce-btn-sm" disabled={page===0} onClick={()=>setPage(page-1)}>◀</button>
+          <span>Page {page+1} / {pageCount}</span>
+          <button className="ce-btn-outline ce-btn-sm" disabled={page>=pageCount-1} onClick={()=>setPage(page+1)}>▶</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ViewCotation({residences, onSelectResidence}){
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const hasScatterData = residences.some((r)=>r.attractivite!==null && r.technique!==null);
+
+  const scatterPoints = residences.filter((r)=>r.attractivite!==null && r.technique!==null).map((r)=>({
+    x:r.attractivite, y:r.technique, r: Math.max(4,Math.min(22, Math.sqrt(r.nbLgt||1)*1.6)), res:r
+  }));
+
+  const baseCols = [
+    {key:'code', label:'Code'},
+    {key:'nom', label:'Résidence'},
+    {key:'commune', label:'Commune'},
+    {key:'familleAttract', label:'Segment'},
+    {key:'attractivite', label:'Attractivité', render:(r)=>r.attractivite!==null? r.attractivite.toFixed(1):'—'},
+    {key:'technique', label:'État technique', render:(r)=>r.technique!==null? r.technique.toFixed(1):'—'},
+    {key:'dpeEnergie', label:'DPE', render:(r)=><DpeBadge cl={r.dpeEnergie}/>},
+  ];
+  const advancedCols = [
+    {key:'nbLgt', label:'Nb lgt'},
+    {key:'secteur', label:'Secteur'},
+    {key:'agence', label:'Agence'},
+    {key:'dpeGES', label:'DPE GES', render:(r)=><DpeBadge cl={r.dpeGES}/>},
+    {key:'familleTechnique', label:'Segment technique'},
+    {key:'qpv', label:'QPV'},
+  ];
+  const columns = showAdvanced ? baseCols.concat(advancedCols) : baseCols;
+
+  return (
+    <div style={{padding:24,display:'flex',flexDirection:'column',gap:20}}>
+      {hasScatterData && (
+        <div className="ce-card">
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
+            <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700}}>Segmentation — Attractivité × État technique</h2>
+            <span style={{fontSize:'.7rem',color:'var(--ce-vert-fonce)'}}>Taille des bulles = nombre de logements</span>
+          </div>
+          <ChartCanvas type="bubble" height={340} data={{
+            datasets:[{
+              label:'Résidences',
+              data: scatterPoints,
+              backgroundColor: scatterPoints.map((p)=> PALETTE[(String(p.res.familleAttract||'').charCodeAt(0)||0)%PALETTE.length]+'cc'),
+            }]
+          }} options={{
+            plugins:{ legend:{display:false},
+              tooltip:{ callbacks:{ label:(ctx)=>{ const r=ctx.raw.res; return (r.nom||r.code)+' — Attract. '+r.x.toFixed(1)+' / Tech. '+r.y.toFixed(1)+' / '+fmtNum(r.nbLgt)+' lgt'; } } }
+            },
+            scales:{ x:{title:{display:true,text:'Attractivité'}}, y:{title:{display:true,text:'État technique'}} },
+            onClick:(evt,elements)=>{ if(elements.length){ const p=scatterPoints[elements[0].index]; onSelectResidence(p.res); } }
+          }} />
+        </div>
+      )}
+      <div className="ce-card">
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
+          <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700}}>Table des résidences ({residences.length})</h2>
+          <button className="ce-btn-outline ce-btn-sm" onClick={()=>setShowAdvanced(!showAdvanced)}>{showAdvanced? 'Masquer les colonnes avancées':'Colonnes avancées'}</button>
+        </div>
+        <SortableTable columns={columns} rows={residences} onRowClick={onSelectResidence} pageSize={20} />
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Investissements & simulation ---------------- */
+function computeYearsRange(operations){
+  const yrs = operations.map((o)=>o.annee).filter((y)=>y!==null && y!==undefined && !isNaN(y));
+  let min = yrs.length? Math.min(...yrs) : 2026;
+  let max = yrs.length? Math.max(...yrs) : 2036;
+  min = Math.min(min, 2026); max = Math.max(max, min+5);
+  const arr=[]; for (let y=min;y<=max;y++) arr.push(y);
+  return arr;
+}
+
+function ViewInvestissements({residences, operations, setOperations, includeIdentifiees, setIncludeIdentifiees, budgetLibre, setBudgetLibre, gainsGrid, isModified, onReset}){
+  const [search, setSearch] = useState('');
+  const [page, setPage] = useState(0);
+  const size = 15;
+  const years = useMemo(()=>computeYearsRange(operations), [operations]);
+  const resByCode = useMemo(()=>{ const m={}; residences.forEach((r)=>m[r.code]=r); return m; }, [residences]);
+
+  const visibleOps = useMemo(()=>operations.filter((o)=> includeIdentifiees || o.statut==='programme'), [operations, includeIdentifiees]);
+
+  const families = ['Réhabilitation','Remplacement de composants','Changement de vecteur','Démolition'];
+  const famColors = {'Réhabilitation':'#009261','Remplacement de composants':'#58D88B','Changement de vecteur':'#264E46','Démolition':'#FF8364'};
+
+  const aggregation = useMemo(()=>{
+    const agg = {}; families.forEach((f)=>{ agg[f]={}; years.forEach((y)=>agg[f][y]=0); });
+    visibleOps.forEach((o)=>{ if (o.annee===null||!years.includes(o.annee)) return; const f=familyOfType(o.type); if(!agg[f]) agg[f]={}; agg[f][o.annee]=(agg[f][o.annee]||0)+(o.montant||0); });
+    const budgetSeries = years.map((y)=>Number(budgetLibre[y])||0);
+    return { agg, budgetSeries };
+  }, [visibleOps, years, budgetLibre]);
+
+  const totalByYear = years.map((y)=> families.reduce((s,f)=>s+(aggregation.agg[f][y]||0),0) + (Number(budgetLibre[y])||0));
+
+  const filteredOps = useMemo(()=>{
+    if (!search.trim()) return operations;
+    const s = ceNorm(search);
+    return operations.filter((o)=>{
+      const r = resByCode[o.resCode];
+      return ceNorm(o.type).includes(s) || ceNorm(o.resCode).includes(s) || (r && ceNorm(r.nom).includes(s));
+    });
+  }, [operations, search, resByCode]);
+
+  useEffect(()=>{ setPage(0); }, [search, operations.length]);
+  const pageCount = Math.max(1, Math.ceil(filteredOps.length/size));
+  const pageOps = filteredOps.slice(page*size, page*size+size);
+
+  const typeOptions = useMemo(()=>{
+    const s = new Set(Object.keys(gainsGrid));
+    operations.forEach((o)=>s.add(o.type));
+    return Array.from(s).sort((a,b)=>a.localeCompare(b,'fr'));
+  }, [gainsGrid, operations]);
+
+  function updateOp(id, patch){ setOperations(operations.map((o)=> o.id===id? Object.assign({},o,patch) : o)); }
+  function deleteOp(id){ setOperations(operations.filter((o)=>o.id!==id)); }
+  function addOp(){
+    const newOp = { id:'op_new_'+Date.now(), resCode: residences[0] && residences[0].code, type: typeOptions[0]||'Réha niv. 1', statut:'identifie', annee: years[0], montant:0, logements:null, origine:'ajout' };
+    setOperations([newOp].concat(operations));
+  }
+
+  return (
+    <div style={{padding:24,display:'flex',flexDirection:'column',gap:20}}>
+      <div className="ce-card">
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:10,marginBottom:12}}>
+          <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700}}>Évolution des investissements ({years[0]}–{years[years.length-1]})</h2>
+          <div style={{display:'flex',gap:14,alignItems:'center'}}>
+            <label style={{fontSize:'.78rem',color:'var(--ce-vert-fonce)',display:'flex',alignItems:'center',gap:6,cursor:'pointer'}}>
+              <input type="checkbox" checked={includeIdentifiees} onChange={(e)=>setIncludeIdentifiees(e.target.checked)} />
+              Inclure les opérations identifiées
+            </label>
+            {isModified && <button className="ce-btn-corail ce-btn-sm" onClick={onReset}>Réinitialiser la simulation</button>}
+          </div>
+        </div>
+        <ChartCanvas type="bar" height={300} data={{
+          labels: years,
+          datasets: families.map((f)=>({ label:f, data: years.map((y)=>aggregation.agg[f][y]||0), backgroundColor: famColors[f], stack:'s' }))
+            .concat([{ label:'Ligne budgétaire libre', data: aggregation.budgetSeries, backgroundColor:'#F8C6BA', stack:'s' }])
+        }} options={{ scales:{ x:{stacked:true}, y:{stacked:true, ticks:{callback:(v)=>fmtKEur(v)}} },
+          plugins:{ tooltip:{ callbacks:{ label:(ctx)=> ctx.dataset.label+': '+fmtEur(ctx.raw) } } } }} />
+      </div>
+
+      <div className="ce-card">
+        <h3 style={{fontSize:'.85rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700,marginBottom:10}}>Ligne budgétaire libre (par année, en €)</h3>
+        <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+          {years.map((y)=>(
+            <div key={y} style={{display:'flex',flexDirection:'column',gap:3}}>
+              <label style={{fontSize:'.68rem',color:'var(--ce-vert-fonce)'}}>{y}</label>
+              <input className="ce-input" style={{width:92}} type="number" value={budgetLibre[y]||''}
+                placeholder="0"
+                onChange={(e)=>setBudgetLibre(Object.assign({},budgetLibre,{[y]: e.target.value===''? undefined : Number(e.target.value)}))} />
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="ce-card">
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:10,marginBottom:12}}>
+          <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700}}>Opérations ({filteredOps.length})</h2>
+          <div style={{display:'flex',gap:8}}>
+            <input className="ce-input" placeholder="Rechercher résidence / type…" value={search} onChange={(e)=>setSearch(e.target.value)} style={{width:220}} />
+            <button className="ce-btn ce-btn-sm" onClick={addOp}>+ Ajouter une opération</button>
+          </div>
+        </div>
+        <div style={{overflowX:'auto',border:'1px solid #eef4f2',borderRadius:8}}>
+          <table className="ce-table">
+            <thead><tr>
+              <th>Résidence</th><th>Type de travaux</th><th>Statut</th><th>Année</th><th>Montant (€)</th><th></th>
+            </tr></thead>
+            <tbody>
+              {pageOps.map((o)=>{
+                const r = resByCode[o.resCode];
+                const generic = !gainsGrid[o.type] && !/^demol/.test(ceNorm(o.type));
+                return (
+                  <tr key={o.id} style={{cursor:'default'}}>
+                    <td>{r? (r.nom||r.code) : o.resCode}</td>
+                    <td>
+                      <select className="ce-select" value={o.type} onChange={(e)=>updateOp(o.id,{type:e.target.value})}>
+                        {typeOptions.map((t)=><option key={t} value={t}>{t}</option>)}
+                      </select>
+                      {generic && <div style={{fontSize:'.65rem',color:'var(--ce-corail)',marginTop:2}}>type générique importé — gain DPE non calculé</div>}
+                    </td>
+                    <td>
+                      <select className="ce-select" value={o.statut} onChange={(e)=>updateOp(o.id,{statut:e.target.value})}>
+                        <option value="programme">Programmé</option>
+                        <option value="identifie">Identifié</option>
+                      </select>
+                    </td>
+                    <td><input className="ce-input" style={{width:76}} type="number" value={o.annee ?? ''} onChange={(e)=>updateOp(o.id,{annee: e.target.value===''? null: Number(e.target.value)})} /></td>
+                    <td><input className="ce-input" style={{width:110}} type="number" value={o.montant ?? 0} onChange={(e)=>updateOp(o.id,{montant: Number(e.target.value)||0})} /></td>
+                    <td><button className="ce-btn-outline ce-btn-sm" onClick={()=>deleteOp(o.id)}>Suppr.</button></td>
+                  </tr>
+                );
+              })}
+              {pageOps.length===0 && <tr><td colSpan={6} style={{textAlign:'center',color:'#9fb3ae',padding:20}}>Aucune opération.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+        {pageCount>1 && (
+          <div style={{display:'flex',gap:8,alignItems:'center',justifyContent:'flex-end',marginTop:10,fontSize:'.75rem',color:'var(--ce-vert-fonce)'}}>
+            <button className="ce-btn-outline ce-btn-sm" disabled={page===0} onClick={()=>setPage(page-1)}>◀</button>
+            <span>Page {page+1} / {pageCount}</span>
+            <button className="ce-btn-outline ce-btn-sm" disabled={page>=pageCount-1} onClick={()=>setPage(page+1)}>▶</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Décarbonation & DPE ---------------- */
+function ViewDecarbonation({residences, operations, gainsGrid, hasGainsGrid, includeIdentifiees}){
+  const [metric, setMetric] = useState('energie');
+  const years = useMemo(()=>computeYearsRange(operations), [operations]);
+  const classes = ['A','B','C','D','E','F','G','NR'];
+
+  const trajectory = useMemo(()=>{
+    if (!hasGainsGrid) return null;
+    return computeTrajectory(residences, operations, gainsGrid, years, metric, includeIdentifiees);
+  }, [residences, operations, gainsGrid, years, metric, includeIdentifiees, hasGainsGrid]);
+
+  const initial = trajectory ? trajectory[years[0]] : null;
+  const final = trajectory ? trajectory[years[years.length-1]] : null;
+  const bestShare = (d)=> d ? ((d.A+d.B+d.C) / Math.max(1, classes.reduce((s,c)=>s+d[c],0)) * 100) : null;
+
+  return (
+    <div style={{padding:24,display:'flex',flexDirection:'column',gap:20}}>
+      {!hasGainsGrid && (
+        <div className="ce-card" style={{background:'var(--ce-saumon)'}}>
+          Grille de gains DPE (onglet « Référentiel des gains DPE ») introuvable dans ce fichier : la projection de trajectoire n'est pas disponible. Seule la distribution actuelle peut être affichée.
+        </div>
+      )}
+      {trajectory && (
+        <React.Fragment>
+          <div style={{display:'flex',gap:16,flexWrap:'wrap'}}>
+            <KpiCard label={"Logements classe A-C en "+years[0]} value={bestShare(initial)!==null? bestShare(initial).toFixed(0)+'%':'—'} />
+            <KpiCard label={"Logements classe A-C en "+years[years.length-1]} value={bestShare(final)!==null? bestShare(final).toFixed(0)+'%':'—'} sub="Projection selon les opérations en cours de simulation" />
+          </div>
+          <div className="ce-card">
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
+              <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700}}>Trajectoire de décarbonation — DPE {metric==='energie'?'Énergie':'GES'}</h2>
+              <div style={{display:'flex',gap:6}}>
+                <button className={metric==='energie'?'ce-btn ce-btn-sm':'ce-btn-outline ce-btn-sm'} onClick={()=>setMetric('energie')}>Énergie</button>
+                <button className={metric==='ges'?'ce-btn ce-btn-sm':'ce-btn-outline ce-btn-sm'} onClick={()=>setMetric('ges')}>GES</button>
+              </div>
+            </div>
+            <ChartCanvas type="bar" height={340} data={{
+              labels: years,
+              datasets: classes.filter((c)=>years.some((y)=>trajectory[y][c]>0)).map((c)=>({
+                label:c, data: years.map((y)=>trajectory[y][c]||0), backgroundColor: DPE_COLORS[c], stack:'s'
+              }))
+            }} options={{ scales:{ x:{stacked:true}, y:{stacked:true, title:{display:true,text:'Logements'}} } }} />
+            <p style={{fontSize:'.7rem',color:'var(--ce-vert-fonce)',marginTop:10,lineHeight:1.5}}>
+              Méthodologie (§8.2 du cahier des charges) : chaque résidence part de sa distribution DPE constatée ;
+              chaque opération programmée (ou identifiée si incluse) applique le gain de la grille de référence à la classe
+              atteinte à cet instant, avec effet cumulatif pour les opérations successives. Une démolition sort la résidence
+              du parc à compter de l'année concernée. Simplification V1 : le gain s'applique à l'ensemble du parc de la
+              résidence, pas uniquement aux logements concernés par l'opération.
+            </p>
+          </div>
+        </React.Fragment>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- Actions identifiées ---------------- */
+function groupByYear(entries, valueKey){
+  const m = {};
+  entries.forEach((e)=>{ const y = e.annee===null||e.annee===undefined? 'Année non renseignée' : e.annee; m[y]=(m[y]||0)+(e[valueKey]||0); });
+  return m;
+}
+
+function ViewActions({actionsIdentifiees}){
+  const {cessions, demolitions, travauxIdentifies} = actionsIdentifiees;
+  const cessionsByYear = useMemo(()=>groupByYear(cessions,'nbLogts'), [cessions]);
+  const demolByYear = useMemo(()=>groupByYear(demolitions,'nbLogts'), [demolitions]);
+  const travauxByYear = useMemo(()=>groupByYear(travauxIdentifies,'montant'), [travauxIdentifies]);
+
+  function chartFromMap(m, color){
+    const keys = Object.keys(m).sort((a,b)=> a==='Année non renseignée'?1: b==='Année non renseignée'?-1: Number(a)-Number(b));
+    return { labels:keys, datasets:[{data:keys.map((k)=>m[k]), backgroundColor:color, borderRadius:4}] };
+  }
+
+  const allRows = [].concat(
+    cessions.map((c)=>Object.assign({}, c, {categorie:'Cession'})),
+    demolitions.map((d)=>Object.assign({}, d, {categorie:'Démolition'})),
+    travauxIdentifies.map((t)=>Object.assign({}, t, {categorie:'Travaux identifiés'}))
+  );
+
+  const cols = [
+    {key:'categorie', label:'Politique'},
+    {key:'nom', label:'Groupe / Résidence'},
+    {key:'annee', label:'Année', render:(r)=>r.annee ?? '—'},
+    {key:'nbLogts', label:'Logements', render:(r)=>r.nbLogts? fmtNum(r.nbLogts) : '—'},
+    {key:'montant', label:'Montant', render:(r)=>r.montant? fmtEur(r.montant) : '—'},
+  ];
+
+  return (
+    <div style={{padding:24,display:'flex',flexDirection:'column',gap:20}}>
+      <div style={{display:'flex',gap:16,flexWrap:'wrap'}}>
+        <KpiCard label="Cessions identifiées" value={fmtNum(cessions.reduce((s,c)=>s+c.nbLogts,0))} sub="logements" />
+        <KpiCard label="Démolitions identifiées" value={fmtNum(demolitions.reduce((s,c)=>s+c.nbLogts,0))} sub="logements" />
+        <KpiCard label="Travaux identifiés" value={fmtKEur(travauxIdentifies.reduce((s,c)=>s+c.montant,0))} sub={travauxIdentifies.length+" opérations"} />
+      </div>
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:16}}>
+        <div className="ce-card"><h3 style={{fontSize:'.82rem',fontWeight:700,marginBottom:10}}>Cessions par année (lgt)</h3><ChartCanvas type="bar" height={200} data={chartFromMap(cessionsByYear,'#009261')} options={{plugins:{legend:{display:false}}}} /></div>
+        <div className="ce-card"><h3 style={{fontSize:'.82rem',fontWeight:700,marginBottom:10}}>Démolitions par année (lgt)</h3><ChartCanvas type="bar" height={200} data={chartFromMap(demolByYear,'#FF8364')} options={{plugins:{legend:{display:false}}}} /></div>
+        <div className="ce-card"><h3 style={{fontSize:'.82rem',fontWeight:700,marginBottom:10}}>Travaux identifiés par année (€)</h3><ChartCanvas type="bar" height={200} data={chartFromMap(travauxByYear,'#264E46')} options={{plugins:{legend:{display:false}}}} /></div>
+      </div>
+      <div className="ce-card">
+        <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700,marginBottom:12}}>Détail ({allRows.length})</h2>
+        <SortableTable columns={cols} rows={allRows} pageSize={20} />
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Fiche résidence (drill-down) ---------------- */
+function ResidenceDrawer({residence, operations, onClose}){
+  const [tab, setTab] = useState('synthese');
+  if (!residence) return null;
+  const ops = operations.filter((o)=>o.resCode===residence.code).sort((a,b)=>(a.annee||9999)-(b.annee||9999));
+  const programmees = ops.filter((o)=>o.statut==='programme');
+  const identifiees = ops.filter((o)=>o.statut==='identifie');
+
+  const byYear = {};
+  ops.forEach((o)=>{ const y=o.annee||'?'; byYear[y]=(byYear[y]||0)+(o.montant||0); });
+  const years = Object.keys(byYear).filter((y)=>y!=='?').sort();
+
+  const tabs = [
+    {id:'synthese', label:'Synthèse'},
+    {id:'travaux', label:'Besoins de travaux'},
+    {id:'actions', label:'Actions stratégiques'},
+    {id:'suivi', label:'Suivi / commentaire'},
+  ];
+
+  return (
+    <React.Fragment>
+      <div className="drawer-overlay" onClick={onClose}></div>
+      <div className="drawer">
+        <div style={{background:'var(--ce-vert-tres-fonce)',padding:'18px 22px',color:'#fff'}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start'}}>
+            <div>
+              <div style={{fontSize:'.68rem',opacity:.75,textTransform:'uppercase',letterSpacing:'.04em'}}>Fiche résidence</div>
+              <div style={{fontSize:'1.2rem',fontWeight:700}}>{residence.nom || residence.code}</div>
+              <div style={{fontSize:'.78rem',opacity:.85,marginTop:2}}>{[residence.commune, residence.secteur, residence.agence].filter(Boolean).join(' · ')}</div>
+            </div>
+            <button onClick={onClose} style={{background:'transparent',border:'none',color:'#fff',fontSize:'1.3rem',cursor:'pointer',lineHeight:1}}>×</button>
+          </div>
+          <div style={{display:'flex',gap:8,marginTop:12}}>
+            <DpeBadge cl={residence.dpeEnergie}/><span style={{fontSize:'.72rem',opacity:.85,alignSelf:'center'}}>Énergie</span>
+            <DpeBadge cl={residence.dpeGES}/><span style={{fontSize:'.72rem',opacity:.85,alignSelf:'center'}}>GES</span>
+          </div>
+        </div>
+        <div style={{display:'flex',borderBottom:'2px solid #eef4f2',padding:'0 12px'}}>
+          {tabs.map((t)=>(<div key={t.id} className={"ce-tab"+(tab===t.id?" active":"")} onClick={()=>setTab(t.id)}>{t.label}</div>))}
+        </div>
+        <div style={{padding:22}}>
+          {tab==='synthese' && (
+            <div style={{display:'flex',flexDirection:'column',gap:16}}>
+              <div className="ce-card">
+                <h3 style={{fontSize:'.8rem',fontWeight:700,marginBottom:10}}>Identité</h3>
+                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,fontSize:'.8rem'}}>
+                  <div><b>Code :</b> {residence.code}</div>
+                  <div><b>Nb logements :</b> {fmtNum(residence.nbLgt)}</div>
+                  {residence.adresse && <div style={{gridColumn:'1 / -1'}}><b>Adresse :</b> {residence.adresse}</div>}
+                  {residence.qpv && <div><b>QPV :</b> {residence.qpv}</div>}
+                </div>
+              </div>
+              <div className="ce-card">
+                <h3 style={{fontSize:'.8rem',fontWeight:700,marginBottom:10}}>Scores de diagnostic</h3>
+                <CritBar label={"Attractivité"+(residence.familleAttract? ' (famille '+residence.familleAttract+')':'')} value={residence.attractivite||0} max={100} />
+                <CritBar label={"État technique"+(residence.familleTechnique? ' (famille '+residence.familleTechnique+')':'')} value={residence.technique||0} max={100} />
+              </div>
+              {years.length>0 && (
+                <div className="ce-card">
+                  <h3 style={{fontSize:'.8rem',fontWeight:700,marginBottom:10}}>Travaux programmés par année</h3>
+                  <ChartCanvas type="bar" height={180} data={{labels:years, datasets:[{data:years.map((y)=>byYear[y]), backgroundColor:'#009261', borderRadius:4}]}} options={{plugins:{legend:{display:false}}}} />
+                </div>
+              )}
+            </div>
+          )}
+          {tab==='travaux' && (
+            <div className="ce-card">
+              <table className="ce-table">
+                <thead><tr><th>Type</th><th>Statut</th><th>Année</th><th>Montant</th></tr></thead>
+                <tbody>
+                  {ops.map((o)=>(<tr key={o.id}><td>{o.type}</td><td>{o.statut==='programme'?'Programmé':'Identifié'}</td><td>{o.annee??'—'}</td><td>{fmtEur(o.montant)}</td></tr>))}
+                  {ops.length===0 && <tr><td colSpan={4} style={{textAlign:'center',color:'#9fb3ae',padding:16}}>Aucune opération recensée pour cette résidence.</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {tab==='actions' && (
+            <div style={{display:'flex',flexDirection:'column',gap:16}}>
+              <div>
+                <h3 style={{fontSize:'.8rem',fontWeight:700,marginBottom:8,color:'var(--ce-vert-principal)'}}>Actions arbitrées ({programmees.length})</h3>
+                {programmees.map((o)=>(<div key={o.id} className="ce-card" style={{marginBottom:8,borderLeft:'4px solid var(--ce-vert-principal)'}}>
+                  <b>{o.type}</b> — {o.annee||'année n.c.'} — {fmtEur(o.montant)}
+                </div>))}
+                {programmees.length===0 && <div style={{fontSize:'.78rem',color:'#9fb3ae'}}>Aucune.</div>}
+              </div>
+              <div>
+                <h3 style={{fontSize:'.8rem',fontWeight:700,marginBottom:8,color:'var(--ce-corail)'}}>Actions à arbitrer ({identifiees.length})</h3>
+                {identifiees.map((o)=>(<div key={o.id} className="ce-card" style={{marginBottom:8,borderLeft:'4px solid var(--ce-corail)'}}>
+                  <b>{o.type}</b> — {o.annee||'année n.c.'} — {fmtEur(o.montant)}
+                </div>))}
+                {identifiees.length===0 && <div style={{fontSize:'.78rem',color:'#9fb3ae'}}>Aucune.</div>}
+              </div>
+            </div>
+          )}
+          {tab==='suivi' && (
+            <div className="ce-card">
+              <textarea disabled placeholder="Non disponible en V1 (lecture seule — pas d'édition des données sources)" style={{width:'100%',minHeight:120,border:'1.5px solid #dfeae6',borderRadius:8,padding:10,fontFamily:'var(--ce-font)',color:'#9fb3ae',resize:'vertical'}}></textarea>
+            </div>
+          )}
+        </div>
+      </div>
+    </React.Fragment>
+  );
+}
+
+/* ---------------- App racine ---------------- */
+function App(){
+  const [data, setData] = useState(null);
+  const [simOperations, setSimOperationsRaw] = useState([]);
+  const [budgetLibre, setBudgetLibreRaw] = useState({});
+  const [includeIdentifiees, setIncludeIdentifiees] = useState(true);
+  const [dirty, setDirty] = useState(false);
+  const [filters, setFilters] = useState({commune:'',secteur:'',famille:'',dpe:''});
+  const [activeTab, setActiveTab] = useState('ensemble');
+  const [selectedResidence, setSelectedResidence] = useState(null);
+
+  function onLoaded(d){
+    setData(d);
+    setSimOperationsRaw(d.operations.map((o)=>Object.assign({},o)));
+    setBudgetLibreRaw({});
+    setDirty(false);
+    setActiveTab('ensemble');
+  }
+  function setOperations(next){ setSimOperationsRaw(next); setDirty(true); }
+  function setBudgetLibre(next){ setBudgetLibreRaw(next); setDirty(true); }
+  function resetSimulation(){ setSimOperationsRaw(data.operations.map((o)=>Object.assign({},o))); setBudgetLibreRaw({}); setIncludeIdentifiees(true); setDirty(false); }
+
+  if (!data) return <ImportScreen onLoaded={onLoaded} />;
+
+  const filteredResidences = applyFilters(data.residences, filters);
+  const filteredCodes = new Set(filteredResidences.map((r)=>r.code));
+  const filteredOperations = simOperations.filter((o)=>filteredCodes.has(o.resCode));
+
+  return (
+    <div style={{minHeight:'100vh',display:'flex',flexDirection:'column'}}>
+      <div className="ce-header">
+        <CeLogo/>
+        <span className="ce-header-title">Outil interactif d'exploration du <b>PSP</b> — {data.fileName}</span>
+        <div style={{marginLeft:'auto',display:'flex',gap:10,alignItems:'center'}}>
+          <span className="ce-badge" style={{background: data.gabaritComplet? 'var(--ce-vert-clair)':'var(--ce-saumon)', color:'var(--ce-vert-tres-fonce)'}}>
+            Gabarit {data.gabaritComplet? 'complet':'réduit'} · {data.residences.length} résidences · {data.nbCols} colonnes
+          </span>
+          <button className="ce-btn-outline ce-btn-sm" style={{color:'#fff',borderColor:'#fff'}} onClick={()=>setData(null)}>Importer un autre fichier</button>
+        </div>
+      </div>
+
+      {dirty && (
+        <div className="sim-banner">
+          <span>🧪 Mode simulation actif — les valeurs affichées ne correspondent plus aux données brutes du fichier importé.</span>
+          <button className="ce-btn-sm" style={{background:'#fff',color:'var(--ce-corail)',border:'none',borderRadius:5,fontWeight:700,cursor:'pointer',padding:'4px 12px'}} onClick={resetSimulation}>Réinitialiser</button>
+        </div>
+      )}
+
+      <FilterBar residences={data.residences} filters={filters} setFilters={setFilters} />
+      <Nav active={activeTab} setActive={setActiveTab} hasActions={data.actionsIdentifiees.disponible} />
+
+      <div style={{flex:1}}>
+        {activeTab==='ensemble' && <ViewEnsemble residences={filteredResidences} operations={filteredOperations} gabaritComplet={data.gabaritComplet} />}
+        {activeTab==='cotation' && <ViewCotation residences={filteredResidences} onSelectResidence={setSelectedResidence} />}
+        {activeTab==='invest' && (
+          <ViewInvestissements
+            residences={filteredResidences}
+            operations={filteredOperations}
+            setOperations={(next)=>{
+              const otherCodesOps = simOperations.filter((o)=>!filteredCodes.has(o.resCode));
+              setOperations(otherCodesOps.concat(next));
+            }}
+            includeIdentifiees={includeIdentifiees}
+            setIncludeIdentifiees={(v)=>{setIncludeIdentifiees(v); setDirty(true);}}
+            budgetLibre={budgetLibre}
+            setBudgetLibre={setBudgetLibre}
+            gainsGrid={data.gainsGrid}
+            isModified={dirty}
+            onReset={resetSimulation}
+          />
+        )}
+        {activeTab==='dpe' && <ViewDecarbonation residences={filteredResidences} operations={filteredOperations} gainsGrid={data.gainsGrid} hasGainsGrid={data.hasGainsGrid} includeIdentifiees={includeIdentifiees} />}
+        {activeTab==='actions' && <ViewActions actionsIdentifiees={data.actionsIdentifiees} />}
+      </div>
+
+      <div className="ce-footer">cellance — Document confidentiel — Traitement 100% local, aucune donnée transmise</div>
+      <ResidenceDrawer residence={selectedResidence} operations={simOperations} onClose={()=>setSelectedResidence(null)} />
+    </div>
+  );
+}
+
+function MissingLibsScreen({missing}){
+  return (
+    <div style={{minHeight:'100vh',display:'flex',alignItems:'center',justifyContent:'center',padding:24,fontFamily:'sans-serif'}}>
+      <div style={{maxWidth:520,background:'#fff',border:'1px solid #F8C6BA',borderRadius:10,padding:24}}>
+        <h1 style={{color:'#FF8364',fontSize:'1.1rem',marginBottom:10}}>Chargement incomplet</h1>
+        <p style={{fontSize:'.85rem',color:'#1C3A35',lineHeight:1.6}}>
+          Les bibliothèques suivantes n'ont pas pu être chargées depuis leur CDN : <b>{missing.join(', ')}</b>.
+          L'outil ne peut pas fonctionner sans elles. Vérifiez votre connexion Internet, ou que votre réseau
+          (proxy / pare-feu d'entreprise) autorise l'accès à <code>cdnjs.cloudflare.com</code>, puis rechargez cette page.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+const missingLibs = [];
+if (typeof XLSX==='undefined') missingLibs.push('SheetJS (lecture Excel)');
+if (typeof Chart==='undefined') missingLibs.push('Chart.js (graphiques)');
+
+ReactDOM.createRoot(document.getElementById('root')).render(missingLibs.length ? <MissingLibsScreen missing={missingLibs} /> : <App />);
+</script>
+</body>
+</html>
