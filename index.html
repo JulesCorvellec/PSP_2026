@@ -2165,7 +2165,10 @@ function ViewInvestissements({residences, operations, setOperations, includeIden
           <ChartCanvas type="line" height={260} data={{
             labels: years,
             datasets: [
-              ...(compareView!=='actuel'? [{ label:'Base — '+baseImport.nom, data: baseTotalByYear, borderColor:'#9fb3ae', backgroundColor:'#9fb3ae', pointRadius:2, tension:.2 }] : []),
+              // §14.3 — aucune résidence base ne passe les filtres transverses actifs : ne pas
+              // inclure le dataset "Base" plutôt que de le tracer à 0 (une ligne plate à zéro se lit
+              // à tort comme "la base ne prévoyait aucun investissement").
+              ...(compareView!=='actuel' && baseImport.data.residences.length>0? [{ label:'Base — '+baseImport.nom, data: baseTotalByYear, borderColor:'#9fb3ae', backgroundColor:'#9fb3ae', pointRadius:2, tension:.2 }] : []),
               ...(compareView!=='base'? [{ label:'Actuel', data: totalByYear, borderColor:'#009261', backgroundColor:'#009261', pointRadius:2, tension:.2 }] : []),
             ]
           }} options={{ scales:{ y:{ beginAtZero:true, ticks:{callback:(v)=>fmtKEur(v)} } },
@@ -2405,7 +2408,10 @@ function ViewDecarbonation({residences, operations, gainsGrid, hasGainsGrid, inc
               <ChartCanvas type="line" height={260} data={{
                 labels: years,
                 datasets: [
-                  ...(compareView!=='actuel'? [{ label:'Base — '+baseImport.nom, data: baseShareByYear, borderColor:'#9fb3ae', backgroundColor:'#9fb3ae', pointRadius:2, tension:.2 }] : []),
+                  // §14.3 — cf. commentaire équivalent dans ViewInvestissements : aucune résidence
+                  // base ne passe les filtres transverses actifs → omettre le dataset plutôt qu'une
+                  // ligne plate à 0%, trompeuse.
+                  ...(compareView!=='actuel' && baseImport.data.residences.length>0? [{ label:'Base — '+baseImport.nom, data: baseShareByYear, borderColor:'#9fb3ae', backgroundColor:'#9fb3ae', pointRadius:2, tension:.2 }] : []),
                   ...(compareView!=='base'? [{ label:'Actuel', data: actuelShareByYear, borderColor:'#009261', backgroundColor:'#009261', pointRadius:2, tension:.2 }] : []),
                 ]
               }} options={{ scales:{ y:{ beginAtZero:true, max:100, title:{display:true,text:'% logements classe A-C'} } } }} />
@@ -3531,6 +3537,31 @@ function App(){
   // qui force LeafletMap (cf. ViewCarto) à reconstruire tous les marqueurs et recentrer la carte.
   const filteredResidences = useMemo(()=> data? applyFilters(data.residences, filters) : [], [data, filters]);
 
+  // §14 — filtres transversaux appliqués aussi à la version "base" des comparaisons inline
+  // (ViewCotation, ViewInvestissements, ViewDecarbonation) : calculé une seule fois ici plutôt que
+  // dans chacune des 3 vues, pour ne prendre aucun risque de divergence entre elles. budgetLignes
+  // n'est pas rattaché à des résidences précises : non filtré, transmis tel quel via Object.assign.
+  const hasUsableBase = !!(baseImport && baseImport.data && baseImport.id!==currentSaveId);
+  const baseFilteredResidences = useMemo(
+    () => hasUsableBase ? applyFilters(baseImport.data.residences, filters) : [],
+    [baseImport, filters, hasUsableBase]
+  );
+  const baseFilteredCodes = useMemo(
+    () => new Set(baseFilteredResidences.map((r) => r.code)),
+    [baseFilteredResidences]
+  );
+  const baseFilteredOperations = useMemo(
+    () => hasUsableBase ? (baseImport.simOperations || []).filter((o) => baseFilteredCodes.has(o.resCode)) : [],
+    [baseImport, baseFilteredCodes, hasUsableBase]
+  );
+  const baseImportFiltered = useMemo(() => {
+    if (!hasUsableBase) return null;
+    return Object.assign({}, baseImport, {
+      data: Object.assign({}, baseImport.data, { residences: baseFilteredResidences }),
+      simOperations: baseFilteredOperations,
+    });
+  }, [baseImport, baseFilteredResidences, baseFilteredOperations, hasUsableBase]);
+
   if (!data){
     return <ImportScreen onLoaded={onLoaded} onRestore={onRestoreSave} onBaseChanged={()=>setBaseRefreshTick((t)=>t+1)} />;
   }
@@ -3542,7 +3573,6 @@ function App(){
   const filteredOperations = simOperations.filter((o)=>o.resCode===null || filteredCodes.has(o.resCode));
   const hasCarto = data.residences.some((r)=>r.adresse && String(r.adresse).trim());
   const hasFinance = data.residences.some((r)=>r.crd!==null || r.autofinancement!==null || r.vnc!==null);
-  const hasUsableBase = !!(baseImport && baseImport.data && baseImport.id!==currentSaveId);
   const hasCompare = savesCount>=2 || !!baseImport;
 
   return (
@@ -3579,7 +3609,7 @@ function App(){
 
       <div style={{flex:1}}>
         {activeTab==='ensemble' && <ViewEnsemble residences={filteredResidences} operations={filteredOperations} />}
-        {activeTab==='cotation' && <ViewCotation residences={filteredResidences} onSelectResidence={setSelectedResidence} operations={filteredOperations} includeIdentifiees={includeIdentifiees} baseImport={hasUsableBase?baseImport:null} />}
+        {activeTab==='cotation' && <ViewCotation residences={filteredResidences} onSelectResidence={setSelectedResidence} operations={filteredOperations} includeIdentifiees={includeIdentifiees} baseImport={baseImportFiltered} />}
         {activeTab==='invest' && (
           <ViewInvestissements
             residences={filteredResidences}
@@ -3595,10 +3625,10 @@ function App(){
             gainsGrid={data.gainsGrid}
             isModified={dirty}
             onReset={resetSimulation}
-            baseImport={hasUsableBase?baseImport:null}
+            baseImport={baseImportFiltered}
           />
         )}
-        {activeTab==='dpe' && <ViewDecarbonation residences={filteredResidences} operations={filteredOperations} gainsGrid={data.gainsGrid} hasGainsGrid={data.hasGainsGrid} includeIdentifiees={includeIdentifiees} baseImport={hasUsableBase?baseImport:null} />}
+        {activeTab==='dpe' && <ViewDecarbonation residences={filteredResidences} operations={filteredOperations} gainsGrid={data.gainsGrid} hasGainsGrid={data.hasGainsGrid} includeIdentifiees={includeIdentifiees} baseImport={baseImportFiltered} />}
         {activeTab==='finance' && <ViewFinance residences={filteredResidences} onSelectResidence={setSelectedResidence} />}
         {activeTab==='offre_vente' && (
           <ViewOffreVente
