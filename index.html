@@ -2014,7 +2014,10 @@ function ViewInvestissements({residences, operations, setOperations, includeIden
 
   const typeOptions = useMemo(()=>{
     const s = new Set(Object.keys(gainsGrid));
-    operations.forEach((o)=>s.add(o.type));
+    // o.type est null pour une opération venant d'être ajoutée (§9.3, champs vides à la création) :
+    // sans ce garde, Array.from(s).sort() tente null.localeCompare(...) et fait planter tout le rendu
+    // React (aucun error boundary dans l'app) dès qu'une opération est ajoutée.
+    operations.forEach((o)=>{ if (o.type) s.add(o.type); });
     return Array.from(s).sort((a,b)=>a.localeCompare(b,'fr'));
   }, [gainsGrid, operations]);
 
