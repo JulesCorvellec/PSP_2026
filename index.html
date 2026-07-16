@@ -61,10 +61,9 @@ table.ce-table tbody tr:hover{background:var(--ce-vert-tres-clair);cursor:pointe
 
 .dpe-badge{display:inline-flex;align-items:center;justify-content:center;min-width:24px;height:20px;padding:0 5px;border-radius:4px;font-weight:800;font-size:.72rem;color:#1C3A35;white-space:nowrap;}
 
-.sim-banner{background:linear-gradient(90deg,var(--ce-corail),#ffab8f);color:#fff;padding:8px 20px;font-size:.78rem;font-weight:700;display:flex;align-items:center;justify-content:space-between;}
 
 .drawer-overlay{position:fixed;inset:0;background:rgba(28,58,53,.45);z-index:50;}
-.drawer{position:fixed;top:0;right:0;bottom:0;width:min(560px,92vw);background:#fff;z-index:51;box-shadow:-8px 0 30px rgba(0,0,0,.2);overflow-y:auto;}
+.drawer{position:fixed;top:0;right:0;bottom:0;width:min(50vw,1100px);min-width:min(560px,92vw);background:#fff;z-index:51;box-shadow:-8px 0 30px rgba(0,0,0,.2);overflow-y:auto;}
 
 .spinner{width:34px;height:34px;border:4px solid var(--ce-vert-pastel);border-top-color:var(--ce-vert-principal);border-radius:50%;animation:spin .8s linear infinite;}
 @keyframes spin{to{transform:rotate(360deg);}}
@@ -199,6 +198,16 @@ function parseBaseCotation(matrix){
     modeECS: findColIndex(header,[/^mode energie ecs$/]),
     dontConventionne: findColIndex(header,[/^dont conventionne$/]),
     dontFoyer: findColIndex(header,[/^dont foyer/]),
+    financement: findColIndex(header,[/^financement$/]),
+    codeInsee: findColIndex(header,[/^code insee$/]),
+    shab: findColIndex(header,[/^shab \(m.?\)$/]),
+    corpro: findColIndex(header,[/^corpro$/]),
+    // Colonne brute en %, distincte de la note de cotation "Taux de vacance" du groupe
+    // critereGroups.economique (échelle 0/33/66/100, cf. CRITERE_GROUP_DEFS ci-dessous) — motif
+    // ancré en préfixe pour absorber le suffixe millésimé côté Aubervilliers ("... (en %) 2024"),
+    // sans jamais matcher la variante bare (cotation) ni la variante "hors démolition".
+    tauxVacance: findColIndex(header,[/^taux de vacance \(en %\)/]),
+    autofinancementLgt: findColIndex(header,[/^autofinancement \(en.*pa lgt\)/, /^autofi\s*\/\s*lgt$/]),
     // Tâche D — Offre nouvelle & Vente : pas d'onglet ONI/ONNI dédié dans les fichiers de référence
     // (confirmé le 2026-07-10, cf. commentaire au-dessus de parseBaseCotation) ; la partie "Vente"
     // est en réalité déjà portée par ces colonnes de la Base de cotation elle-même (confirmées dans
@@ -345,7 +354,12 @@ function parseBaseCotation(matrix){
     // computeTechniqueProjection() plus bas.
     let natureIdx=-1;
     for (const k in span){ if (/^nature des travaux$/.test(k)){ natureIdx=span[k]; break; } }
-    return { typeIdx:start, natureIdx, anneeIdx, montantIdx, logIdx, statut };
+    // "Année de fin de travaux" — absente de tous les blocs sur le fichier Aubervilliers (vérifié le
+    // 2026-07-16, cf. Étape 0) : anneeFinIdx reste -1 pour ce fichier, o.anneeFin est alors toujours
+    // null à l'import (dégradation gracieuse), mais reste éditable manuellement dans l'UI (§9.2).
+    let anneeFinIdx=-1;
+    for (const k in span){ if (/^annee de fin de travaux$/.test(k)){ anneeFinIdx=span[k]; break; } }
+    return { typeIdx:start, natureIdx, anneeIdx, anneeFinIdx, montantIdx, logIdx, statut };
   });
 
   const residences = dataRows.map((row)=>{
@@ -378,6 +392,12 @@ function parseBaseCotation(matrix){
       crd: idx.crd>=0? ceNum(row[idx.crd]):null,
       vnc: idx.vnc>=0? ceNum(row[idx.vnc]):null,
       autofinancement: idx.autofinancement>=0? ceNum(row[idx.autofinancement]):null,
+      financement: idx.financement>=0? row[idx.financement]:null,
+      codeInsee: idx.codeInsee>=0? row[idx.codeInsee]:null,
+      shab: idx.shab>=0? ceNum(row[idx.shab]):null,
+      corpro: idx.corpro>=0? row[idx.corpro]:null,
+      tauxVacance: idx.tauxVacance>=0? ceNum(row[idx.tauxVacance]):null,
+      autofinancementLgt: idx.autofinancementLgt>=0? ceNum(row[idx.autofinancementLgt]):null,
       notes: {},
       critereGroups: {},
     };
@@ -436,6 +456,7 @@ function parseBaseCotation(matrix){
           id:'op'+(opId++), resCode:code, type:String(type).trim(), statut:b.statut,
           nature: (natureVal!==null && natureVal!==undefined && String(natureVal).trim()!=='')? String(natureVal).trim() : null,
           annee: b.anneeIdx>=0? (Number(row[b.anneeIdx])||null):null,
+          anneeFin: b.anneeFinIdx>=0? (Number(row[b.anneeFinIdx])||null):null,
           montant: b.montantIdx>=0? (Number(row[b.montantIdx])||0):0,
           logements: b.logIdx>=0? (Number(row[b.logIdx])||null):null,
           origine:'import',
@@ -758,7 +779,18 @@ async function idbSetBase(id){
 function genSaveId(){
   return 'psp_' + Date.now() + '_' + Math.random().toString(36).slice(2, 10);
 }
-function buildSaveRecord({id, nom, nomFichierSource, gabaritComplet, nbCols, data, simOperations, budgetLibre, offreNouvelleLgt, includeIdentifiees, estBase, dateCreation}){
+// §8 — budgetLignes remplace l'ancien budgetLibre (objet simple {année:montant}) par un tableau de
+// lignes nommées [{id, nom, valeurs:{année:montant}}]. Migration obligatoire à chaque point d'entrée
+// où une sauvegarde ancien format peut être relue (import JSON, restauration, version "base"), pour
+// que la sauvegarde suivante écrive déjà le nouveau format — jamais seulement à l'affichage.
+function migrateBudgetLignes(rec){
+  if (rec && Array.isArray(rec.budgetLignes)) return rec.budgetLignes;
+  if (rec && rec.budgetLibre && Object.keys(rec.budgetLibre).length){
+    return [{id:'migre', nom:'Ligne budgétaire libre', valeurs: rec.budgetLibre}];
+  }
+  return [];
+}
+function buildSaveRecord({id, nom, nomFichierSource, gabaritComplet, nbCols, data, simOperations, budgetLignes, offreNouvelleLgt, ventesSimulees, includeIdentifiees, estBase, dateCreation}){
   const now = new Date().toISOString();
   return {
     id: id || genSaveId(),
@@ -771,8 +803,9 @@ function buildSaveRecord({id, nom, nomFichierSource, gabaritComplet, nbCols, dat
     nbCols,
     data,
     simOperations,
-    budgetLibre,
+    budgetLignes: budgetLignes || [],
     offreNouvelleLgt: offreNouvelleLgt || {},
+    ventesSimulees: ventesSimulees || [],
     includeIdentifiees,
   };
 }
@@ -936,7 +969,7 @@ function ImportScreen({onLoaded, onRestore, onBaseChanged}){
       if (all.some((r)=>r.nom===nom)) nom = nom + ' (import)';
       const record = buildSaveRecord({
         nom, nomFichierSource: obj.nomFichierSource, gabaritComplet: obj.gabaritComplet, nbCols: obj.nbCols,
-        data: obj.data, simOperations: obj.simOperations, budgetLibre: obj.budgetLibre||{}, offreNouvelleLgt: obj.offreNouvelleLgt||{},
+        data: obj.data, simOperations: obj.simOperations, budgetLignes: migrateBudgetLignes(obj), offreNouvelleLgt: obj.offreNouvelleLgt||{}, ventesSimulees: obj.ventesSimulees||[],
         includeIdentifiees: obj.includeIdentifiees!==undefined? obj.includeIdentifiees : true,
         estBase: false,
       });
@@ -1195,8 +1228,8 @@ function FilterBar({residences, filters, setFilters}){
   const familles = useMemo(()=>uniqueSorted(residences.map((r)=>r.familleAttract)), [residences]);
   const dpeClasses = ['A','B','C','D','E','F','G'];
 
-  const hasActive = filters.commune || filters.secteur || filters.famille || filters.dpe;
-  function reset(){ setFilters({commune:'',secteur:'',famille:'',dpe:''}); }
+  const hasActive = filters.commune || filters.secteur || filters.famille || filters.dpe || filters.qpv;
+  function reset(){ setFilters({commune:'',secteur:'',famille:'',dpe:'',qpv:''}); }
 
   return (
     <div style={{background:'#fff',borderBottom:'1px solid #e4ede9',padding:'8px 24px',display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
@@ -1223,6 +1256,11 @@ function FilterBar({residences, filters, setFilters}){
         <option value="">Classe DPE énergie (toutes)</option>
         {dpeClasses.map((c)=><option key={c} value={c}>{c}</option>)}
       </select>
+      <select className="ce-select" value={filters.qpv} onChange={(e)=>setFilters(Object.assign({},filters,{qpv:e.target.value}))}>
+        <option value="">QPV (tous)</option>
+        <option value="qpv">QPV</option>
+        <option value="hors_qpv">Hors QPV</option>
+      </select>
       {hasActive && <button className="ce-btn-outline ce-btn-sm" onClick={reset}>Réinitialiser</button>}
     </div>
   );
@@ -1234,6 +1272,8 @@ function applyFilters(residences, filters){
     if (filters.secteur && (r.secteur||r.agence)!==filters.secteur) return false;
     if (filters.famille && r.familleAttract!==filters.famille) return false;
     if (filters.dpe && r.dpeEnergie!==filters.dpe) return false;
+    if (filters.qpv==='qpv' && !isQpvValue(r.qpv)) return false;
+    if (filters.qpv==='hors_qpv' && isQpvValue(r.qpv)) return false;
     return true;
   });
 }
@@ -1370,6 +1410,15 @@ function ViewEnsemble({residences, operations}){
     return t;
   }, [residences]);
 
+  // Colonne présente mais entièrement vide sur certains fichiers (ex. Aubervilliers) : on masque
+  // le graphique dans ce cas plutôt que d'afficher un anneau vide, pas seulement si absente.
+  const financementTotals = useMemo(()=>{
+    const t = {};
+    residences.forEach((r)=>{ if (r.financement){ const k=String(r.financement).trim(); t[k]=(t[k]||0)+(r.nbLgt||0); } });
+    return t;
+  }, [residences]);
+  const hasFinancement = Object.keys(financementTotals).length>0;
+
   return (
     <div style={{padding:24,display:'flex',flexDirection:'column',gap:20}}>
       <div style={{display:'flex',gap:16,flexWrap:'wrap'}}>
@@ -1480,6 +1529,15 @@ function ViewEnsemble({residences, operations}){
             )}
           </div>
         )}
+        {hasFinancement && (
+          <div className="ce-card">
+            <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700,marginBottom:12}}>Répartition par financement (logements)</h2>
+            <ChartCanvas type="doughnut" height={220} data={{
+              labels: Object.keys(financementTotals),
+              datasets:[{data:Object.values(financementTotals), backgroundColor: Object.keys(financementTotals).map((_,i)=>PALETTE[i%PALETTE.length])}]
+            }} />
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1552,7 +1610,7 @@ function bandOf(pct){
   return 'Mauvais';
 }
 
-function SegmentationGrid({residences}){
+function SegmentationGrid({residences, onSelectResidence}){
   const criteria = useMemo(()=>{
     const list = [
       {key:'attractivite', label:'Attractivité'},
@@ -1567,7 +1625,7 @@ function SegmentationGrid({residences}){
   const [xKey, setXKey] = useState('attractivite');
   const [yKey, setYKey] = useState('technique');
   const [sizeBy, setSizeBy] = useState('nbLgt');
-  const [hovered, setHovered] = useState(null);
+  const [pinned, setPinned] = useState(null);
 
   const xLabel = (criteria.find((c)=>c.key===xKey)||{}).label || xKey;
   const yLabel = (criteria.find((c)=>c.key===yKey)||{}).label || yKey;
@@ -1602,7 +1660,10 @@ function SegmentationGrid({residences}){
     return { rows, colTotals, rowTotals, maxCell, unclassified: unclassifiedCount, maxVal };
   }, [residences, xKey, yKey, sizeBy]);
 
-  const hoveredMembers = hovered ? (rows.find((r)=>r.yBand===hovered.yBand).cells.find((c)=>c.xBand===hovered.xBand).members) : null;
+  const pinnedMembers = pinned ? (rows.find((r)=>r.yBand===pinned.yBand).cells.find((c)=>c.xBand===pinned.xBand).members) : null;
+  function togglePinned(cell){
+    setPinned((cur)=> (cur && cur.xBand===cell.xBand && cur.yBand===cell.yBand) ? null : {xBand:cell.xBand, yBand:cell.yBand});
+  }
 
   return (
     <div className="ce-card">
@@ -1645,16 +1706,15 @@ function SegmentationGrid({residences}){
                   <div style={{display:'flex',alignItems:'center',fontSize:'.68rem',fontWeight:700,color:'var(--ce-vert-fonce)'}}>{row.yBand}</div>
                   {row.cells.map((cell)=>{
                     const alpha = 0.1 + 0.8*(cell.value/maxCell);
-                    const isHovered = hovered && hovered.xBand===cell.xBand && hovered.yBand===cell.yBand;
+                    const isPinned = pinned && pinned.xBand===cell.xBand && pinned.yBand===cell.yBand;
                     return (
                       <div key={cell.xBand}
-                        onMouseEnter={()=>setHovered({xBand:cell.xBand, yBand:cell.yBand})}
-                        onMouseLeave={()=>setHovered(null)}
+                        onClick={()=>togglePinned(cell)}
                         style={{
                           height:80,borderRadius:8,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',
                           background: cell.value>0 ? 'rgba(0,146,97,'+alpha.toFixed(2)+')' : '#f5f8f7',
-                          border: isHovered? '2px solid var(--ce-vert-tres-fonce)' : '1px solid #eef4f2',
-                          cursor:'default', transition:'border .1s',
+                          border: isPinned? '2px solid var(--ce-vert-tres-fonce)' : '1px solid #eef4f2',
+                          cursor:'pointer', transition:'border .1s',
                         }}>
                         <span style={{fontSize:'1.1rem',fontWeight:700,color: alpha>0.5? '#fff':'var(--ce-vert-tres-fonce)'}}>{sizeBy==='nbLgt'? fmtNum(cell.value): cell.value}</span>
                         <span style={{fontSize:'.65rem',color: alpha>0.5? '#fff':'var(--ce-vert-fonce)'}}>{cell.members.length} résidence{cell.members.length>1?'s':''}</span>
@@ -1669,15 +1729,15 @@ function SegmentationGrid({residences}){
         </div>
 
         <div style={{flex:1,minWidth:220,border:'1px solid #eef4f2',borderRadius:8,padding:'10px 14px',maxHeight:280,overflowY:'auto'}}>
-          {!hovered && <div style={{fontSize:'.78rem',color:'#9fb3ae'}}>Survolez une famille pour voir la liste des résidences concernées.</div>}
-          {hovered && (
+          {!pinned && <div style={{fontSize:'.78rem',color:'#9fb3ae'}}>Cliquez sur une famille pour voir la liste des résidences concernées.</div>}
+          {pinned && (
             <React.Fragment>
               <div style={{fontSize:'.78rem',fontWeight:700,color:'var(--ce-vert-tres-fonce)',marginBottom:8}}>
-                {yLabel} : {hovered.yBand} · {xLabel} : {hovered.xBand} — {hoveredMembers.length} résidence{hoveredMembers.length>1?'s':''}
+                {yLabel} : {pinned.yBand} · {xLabel} : {pinned.xBand} — {pinnedMembers.length} résidence{pinnedMembers.length>1?'s':''}
               </div>
-              {hoveredMembers.length===0 && <div style={{fontSize:'.76rem',color:'#9fb3ae'}}>Aucune résidence.</div>}
-              {hoveredMembers.map((r)=>(
-                <div key={r.code} style={{fontSize:'.76rem',color:'var(--ce-vert-fonce)',padding:'3px 0',borderBottom:'1px solid #f0f5f3'}}>
+              {pinnedMembers.length===0 && <div style={{fontSize:'.76rem',color:'#9fb3ae'}}>Aucune résidence.</div>}
+              {pinnedMembers.map((r)=>(
+                <div key={r.code} onClick={()=>onSelectResidence && onSelectResidence(r)} style={{fontSize:'.76rem',color:'var(--ce-vert-fonce)',padding:'3px 0',borderBottom:'1px solid #f0f5f3',cursor:onSelectResidence?'pointer':'default'}}>
                   {r.nom || r.code} <span style={{color:'#9fb3ae'}}>— {fmtNum(r.nbLgt)} lgt</span>
                 </div>
               ))}
@@ -1807,7 +1867,7 @@ function ViewCotation({residences, onSelectResidence, operations, includeIdentif
           )}
         </div>
       )}
-      <SegmentationGrid residences={residences} />
+      <SegmentationGrid residences={residences} onSelectResidence={onSelectResidence} />
       <div className="ce-card">
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
           <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700}}>Table des résidences ({residences.length})</h2>
@@ -1896,15 +1956,36 @@ function computeYearsRange(operations){
   return arr;
 }
 
-function ViewInvestissements({residences, operations, setOperations, includeIdentifiees, setIncludeIdentifiees, budgetLibre, setBudgetLibre, gainsGrid, isModified, onReset, baseImport}){
+// §9.1 — catégorisation de la colonne brute "Type de travaux" (RC / Réha. / Changement de vecteur /
+// Démolition), utilisée UNIQUEMENT comme filtre dans le tableau des opérations de cette vue — jamais
+// comme champ éditable, et jamais ailleurs dans l'outil (fiche résidence, pivot, formulaire d'ajout).
+// Mêmes règles de détection que familyOfType() (robuste aux variantes de libellé), labels alignés sur
+// le vocabulaire brut du fichier plutôt que sur les familles conviviales du graphique d'agrégation.
+const TYPE_CAT_OPTIONS = ['RC','Réha.','Changement de vecteur','Démolition','Non renseigné'];
+function typeCategorie(type){
+  if (!type) return 'Non renseigné';
+  const n = ceNorm(type);
+  if (/^demol/.test(n)) return 'Démolition';
+  if (/^reha/.test(n)) return 'Réha.';
+  if (/passage|vecteur|chgt de mode|chaudiere condensation/.test(n)) return 'Changement de vecteur';
+  return 'RC';
+}
+// §8 — palette des lignes budgétaires libres, distincte des couleurs de familles de travaux
+// (Réhabilitation/RC/Chgt de vecteur/Démolition) déjà utilisées dans le même graphique empilé.
+const BUDGET_LIGNE_COLORS = ['#F8C6BA','#9fb3ae','#B79CED','#FFD16A','#6BC9C0','#E6A4B4'];
+function sumBudgetLignesYear(lignes, y){ return (lignes||[]).reduce((s,l)=>s+(Number((l.valeurs||{})[y])||0),0); }
+function ViewInvestissements({residences, operations, setOperations, includeIdentifiees, setIncludeIdentifiees, budgetLignes, setBudgetLignes, gainsGrid, isModified, onReset, baseImport}){
   const [search, setSearch] = useState('');
   const [compareView, setCompareView] = useState('overlay'); // 'overlay' | 'base' | 'actuel'
-  const [filterType, setFilterType] = useState('');
+  const [filterNature, setFilterNature] = useState('');
+  const [filterTypeCat, setFilterTypeCat] = useState('');
   const [filterStatut, setFilterStatut] = useState('');
   const [filterAnneeMin, setFilterAnneeMin] = useState('');
   const [filterAnneeMax, setFilterAnneeMax] = useState('');
   const [filterMontantMin, setFilterMontantMin] = useState('');
   const [filterMontantMax, setFilterMontantMax] = useState('');
+  const [editingLigneId, setEditingLigneId] = useState(null);
+  const [editingLigneName, setEditingLigneName] = useState('');
   const years = useMemo(()=>computeYearsRange(operations), [operations]);
   const resByCode = useMemo(()=>{ const m={}; residences.forEach((r)=>m[r.code]=r); return m; }, [residences]);
 
@@ -1916,18 +1997,16 @@ function ViewInvestissements({residences, operations, setOperations, includeIden
   const aggregation = useMemo(()=>{
     const agg = {}; families.forEach((f)=>{ agg[f]={}; years.forEach((y)=>agg[f][y]=0); });
     visibleOps.forEach((o)=>{ if (o.annee===null||!years.includes(o.annee)) return; const f=familyOfType(o.type); if(!agg[f]) agg[f]={}; agg[f][o.annee]=(agg[f][o.annee]||0)+(o.montant||0); });
-    const budgetSeries = years.map((y)=>Number(budgetLibre[y])||0);
-    return { agg, budgetSeries };
-  }, [visibleOps, years, budgetLibre]);
+    return { agg };
+  }, [visibleOps, years]);
 
-  const totalByYear = years.map((y)=> families.reduce((s,f)=>s+(aggregation.agg[f][y]||0),0) + (Number(budgetLibre[y])||0));
+  const totalByYear = years.map((y)=> families.reduce((s,f)=>s+(aggregation.agg[f][y]||0),0) + sumBudgetLignesYear(budgetLignes, y));
 
   const hasCompareBase = !!baseImport;
   const baseTotalByYear = useMemo(()=>{
     if (!hasCompareBase) return null;
     const baseOps = (baseImport.simOperations||[]).filter((o)=> baseImport.includeIdentifiees || o.statut==='programme');
-    const baseBudget = baseImport.budgetLibre || {};
-    return years.map((y)=> baseOps.filter((o)=>o.annee===y).reduce((s,o)=>s+(o.montant||0),0) + (Number(baseBudget[y])||0));
+    return years.map((y)=> baseOps.filter((o)=>o.annee===y).reduce((s,o)=>s+(o.montant||0),0) + sumBudgetLignesYear(baseImport.budgetLignes, y));
   }, [baseImport, years, hasCompareBase]);
   const sumArr = (arr)=> arr? arr.reduce((a,b)=>a+b,0) : null;
   const deltaBudget = hasCompareBase ? sumArr(totalByYear) - sumArr(baseTotalByYear) : null;
@@ -1939,9 +2018,9 @@ function ViewInvestissements({residences, operations, setOperations, includeIden
     return Array.from(s).sort((a,b)=>a.localeCompare(b,'fr'));
   }, [gainsGrid, operations]);
 
-  const hasActiveFilters = !!(search.trim() || filterType || filterStatut || filterAnneeMin!=='' || filterAnneeMax!=='' || filterMontantMin!=='' || filterMontantMax!=='');
+  const hasActiveFilters = !!(search.trim() || filterNature || filterTypeCat || filterStatut || filterAnneeMin!=='' || filterAnneeMax!=='' || filterMontantMin!=='' || filterMontantMax!=='');
   function resetFilters(){
-    setSearch(''); setFilterType(''); setFilterStatut('');
+    setSearch(''); setFilterNature(''); setFilterTypeCat(''); setFilterStatut('');
     setFilterAnneeMin(''); setFilterAnneeMax(''); setFilterMontantMin(''); setFilterMontantMax('');
   }
 
@@ -1953,8 +2032,9 @@ function ViewInvestissements({residences, operations, setOperations, includeIden
     const mMax = filterMontantMax===''? null : Number(filterMontantMax);
     return operations.filter((o)=>{
       const r = resByCode[o.resCode];
-      if (s && !(ceNorm(o.type).includes(s) || ceNorm(o.resCode).includes(s) || (r && ceNorm(r.nom).includes(s)))) return false;
-      if (filterType && o.type!==filterType) return false;
+      if (s && !(ceNorm(o.nature||o.type).includes(s) || ceNorm(o.resCode).includes(s) || (r && ceNorm(r.nom).includes(s)))) return false;
+      if (filterNature && (o.nature||o.type)!==filterNature) return false;
+      if (filterTypeCat && typeCategorie(o.type)!==filterTypeCat) return false;
       if (filterStatut && o.statut!==filterStatut) return false;
       if (aMin!==null && (o.annee===null || o.annee<aMin)) return false;
       if (aMax!==null && (o.annee===null || o.annee>aMax)) return false;
@@ -1962,40 +2042,69 @@ function ViewInvestissements({residences, operations, setOperations, includeIden
       if (mMax!==null && (o.montant||0)>mMax) return false;
       return true;
     }).map((o)=>Object.assign({}, o, {resNom: (resByCode[o.resCode]||{}).nom || o.resCode}));
-  }, [operations, search, filterType, filterStatut, filterAnneeMin, filterAnneeMax, filterMontantMin, filterMontantMax, resByCode]);
+  }, [operations, search, filterNature, filterTypeCat, filterStatut, filterAnneeMin, filterAnneeMax, filterMontantMin, filterMontantMax, resByCode]);
 
   function updateOp(id, patch){ setOperations(operations.map((o)=> o.id===id? Object.assign({},o,patch) : o)); }
   function deleteOp(id){ setOperations(operations.filter((o)=>o.id!==id)); }
+  function addLigne(){
+    const id = 'ligne_'+Date.now();
+    setBudgetLignes(budgetLignes.concat([{id, nom:'Nouvelle ligne', valeurs:{}}]));
+  }
+  function removeLigne(id){ setBudgetLignes(budgetLignes.filter((l)=>l.id!==id)); }
+  function updateLigneValeur(id, year, rawVal){
+    setBudgetLignes(budgetLignes.map((l)=> l.id===id? Object.assign({},l,{valeurs:Object.assign({},l.valeurs,{[year]: rawVal===''? undefined : Number(rawVal)})}) : l));
+  }
+  function commitLigneName(id){
+    setBudgetLignes(budgetLignes.map((l)=> l.id===id? Object.assign({},l,{nom: editingLigneName || l.nom}) : l));
+    setEditingLigneId(null);
+  }
   function addOp(){
     // Garde nécessaire : si les filtres transverses actifs excluent toutes les résidences,
     // residences[0] est undefined — sans cette garde, l'opération était créée avec un
     // resCode undefined, invisible dans toutes les vues et impossible à retrouver/supprimer.
     if (!residences.length) return;
-    const newOp = { id:'op_new_'+Date.now(), resCode: residences[0].code, type: typeOptions[0]||'Réha niv. 1', statut:'identifie', annee: years[0], montant:0, logements:null, origine:'ajout' };
+    // §9.3 — tous les champs modifiables démarrent vides pour repérer immédiatement la ligne
+    // nouvellement ajoutée (au lieu de pré-remplir résidence/nature/année/montant par défaut).
+    const newOp = { id:'op_new_'+Date.now(), resCode:null, nature:null, type:null, statut:null, annee:null, anneeFin:null, montant:null, logements:null, origine:'ajout' };
     setOperations([newOp].concat(operations));
   }
 
   const opsCols = [
-    {key:'resNom', label:'Résidence'},
-    {key:'type', label:'Type de travaux', render:(o)=>{
+    {key:'resCode', label:'Résidence', render:(o)=>{
+      const inList = residences.some((r)=>r.code===o.resCode);
+      return (
+        <select className="ce-select" value={o.resCode ?? ''} onChange={(e)=>updateOp(o.id,{resCode:e.target.value})}>
+          <option value="" disabled>— À sélectionner —</option>
+          {!inList && o.resCode && <option value={o.resCode}>{o.resNom || o.resCode} (hors filtre)</option>}
+          {residences.map((r)=><option key={r.code} value={r.code}>{r.nom||r.code}</option>)}
+        </select>
+      );
+    }},
+    {key:'nature', label:'Nature des travaux', render:(o)=>{
       const generic = !hasKnownDpeGain(o, gainsGrid);
+      const val = o.nature ?? o.type ?? '';
       return (
         <div>
-          <select className="ce-select" value={o.type} onChange={(e)=>updateOp(o.id,{type:e.target.value, nature:null})}>
+          <select className="ce-select" value={val} onChange={(e)=>updateOp(o.id,{nature:e.target.value})}>
+            <option value="" disabled>— À sélectionner —</option>
             {typeOptions.map((t)=><option key={t} value={t}>{t}</option>)}
           </select>
-          {generic && <div style={{fontSize:'.65rem',color:'var(--ce-corail)',marginTop:2}}>type générique importé — gain DPE non calculé</div>}
+          {val && generic && <div style={{fontSize:'.65rem',color:'var(--ce-corail)',marginTop:2}}>type générique importé — gain DPE non calculé</div>}
         </div>
       );
     }},
+    {key:'type', label:'Type de travaux', render:(o)=><span style={{color:'#9fb3ae'}}>{o.type || 'Non renseigné'}</span>},
     {key:'statut', label:'Statut', render:(o)=>(
-      <select className="ce-select" value={o.statut} onChange={(e)=>updateOp(o.id,{statut:e.target.value})}>
+      <select className="ce-select" value={o.statut ?? ''} onChange={(e)=>updateOp(o.id,{statut:e.target.value})}>
+        <option value="" disabled>— À sélectionner —</option>
         <option value="programme">Programmé</option>
         <option value="identifie">Identifié</option>
       </select>
     )},
     {key:'annee', label:'Année', render:(o)=><input className="ce-input" style={{width:76}} type="number" value={o.annee ?? ''} onChange={(e)=>updateOp(o.id,{annee: e.target.value===''? null: Number(e.target.value)})} />},
-    {key:'montant', label:'Montant (€)', render:(o)=><input className="ce-input" style={{width:110}} type="number" value={o.montant ?? 0} onChange={(e)=>updateOp(o.id,{montant: Number(e.target.value)||0})} />},
+    {key:'anneeFin', label:'Date de fin de travaux', render:(o)=><input className="ce-input" style={{width:76}} type="number" value={o.anneeFin ?? ''} onChange={(e)=>updateOp(o.id,{anneeFin: e.target.value===''? null: Number(e.target.value)})} />},
+    {key:'montant', label:'Coût de revient TTC', render:(o)=><input className="ce-input" style={{width:110}} type="number" value={o.montant ?? ''} onChange={(e)=>updateOp(o.id,{montant: e.target.value===''? null: Number(e.target.value)})} />},
+    {key:'_coutLgt', label:'Coût TTC / logement', render:(o)=> (o.logements>0 && o.montant!==null && o.montant!==undefined) ? fmtEur(o.montant/o.logements) : '—'},
     {key:'_actions', label:'', render:(o)=><button className="ce-btn-outline ce-btn-sm" onClick={()=>deleteOp(o.id)}>Suppr.</button>},
   ];
 
@@ -2015,7 +2124,7 @@ function ViewInvestissements({residences, operations, setOperations, includeIden
         <ChartCanvas type="bar" height={300} data={{
           labels: years,
           datasets: families.map((f)=>({ label:f, data: years.map((y)=>aggregation.agg[f][y]||0), backgroundColor: famColors[f], stack:'s' }))
-            .concat([{ label:'Ligne budgétaire libre', data: aggregation.budgetSeries, backgroundColor:'#F8C6BA', stack:'s' }])
+            .concat(budgetLignes.map((l,i)=>({ label:l.nom||'Ligne budgétaire', data: years.map((y)=>Number((l.valeurs||{})[y])||0), backgroundColor: BUDGET_LIGNE_COLORS[i%BUDGET_LIGNE_COLORS.length], stack:'s' })))
         }} options={{ scales:{ x:{stacked:true}, y:{stacked:true, ticks:{callback:(v)=>fmtKEur(v)}} },
           plugins:{ tooltip:{ callbacks:{ label:(ctx)=> ctx.dataset.label+': '+fmtEur(ctx.raw) } } } }} />
       </div>
@@ -2046,17 +2155,38 @@ function ViewInvestissements({residences, operations, setOperations, includeIden
       )}
 
       <div className="ce-card">
-        <h3 style={{fontSize:'.85rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700,marginBottom:10}}>Ligne budgétaire libre (par année, en €)</h3>
-        <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
-          {years.map((y)=>(
-            <div key={y} style={{display:'flex',flexDirection:'column',gap:3}}>
-              <label style={{fontSize:'.68rem',color:'var(--ce-vert-fonce)'}}>{y}</label>
-              <input className="ce-input" style={{width:92}} type="number" value={budgetLibre[y]||''}
-                placeholder="0"
-                onChange={(e)=>setBudgetLibre(Object.assign({},budgetLibre,{[y]: e.target.value===''? undefined : Number(e.target.value)}))} />
-            </div>
-          ))}
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
+          <h3 style={{fontSize:'.85rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700}}>Lignes budgétaires libres (par année, en €)</h3>
+          <button className="ce-btn ce-btn-sm" onClick={addLigne}>+ Ajouter une ligne</button>
         </div>
+        {budgetLignes.length===0 && <div style={{fontSize:'.78rem',color:'#9fb3ae'}}>Aucune ligne budgétaire libre — utile pour représenter une enveloppe non ventilée par opération.</div>}
+        {budgetLignes.map((l,i)=>(
+          <div key={l.id} style={{marginBottom:14,paddingBottom:14,borderBottom: i<budgetLignes.length-1? '1px solid #eef4f2':'none'}}>
+            <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:8}}>
+              <span style={{width:10,height:10,borderRadius:'50%',background:BUDGET_LIGNE_COLORS[i%BUDGET_LIGNE_COLORS.length],display:'inline-block',flexShrink:0}}></span>
+              {editingLigneId===l.id ? (
+                <input className="ce-input" value={editingLigneName} autoFocus
+                  onChange={(e)=>setEditingLigneName(e.target.value)}
+                  onBlur={()=>commitLigneName(l.id)}
+                  onKeyDown={(e)=>{ if(e.key==='Enter') e.target.blur(); else if(e.key==='Escape') setEditingLigneId(null); }} />
+              ) : (
+                <span style={{fontWeight:600,color:'var(--ce-vert-tres-fonce)',cursor:'text'}} title="Cliquer pour renommer"
+                  onClick={()=>{setEditingLigneId(l.id); setEditingLigneName(l.nom);}}>{l.nom}</span>
+              )}
+              <button className="ce-btn-outline ce-btn-sm" onClick={()=>removeLigne(l.id)} style={{marginLeft:'auto'}}>Suppr.</button>
+            </div>
+            <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+              {years.map((y)=>(
+                <div key={y} style={{display:'flex',flexDirection:'column',gap:3}}>
+                  <label style={{fontSize:'.68rem',color:'var(--ce-vert-fonce)'}}>{y}</label>
+                  <input className="ce-input" style={{width:92}} type="number" value={(l.valeurs||{})[y]||''}
+                    placeholder="0"
+                    onChange={(e)=>updateLigneValeur(l.id, y, e.target.value)} />
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
       </div>
 
       <div className="ce-card">
@@ -2065,10 +2195,14 @@ function ViewInvestissements({residences, operations, setOperations, includeIden
           <button className="ce-btn ce-btn-sm" onClick={addOp} disabled={!residences.length} title={!residences.length? "Aucune résidence ne correspond aux filtres actifs" : ""}>+ Ajouter une opération</button>
         </div>
         <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'flex-end',marginBottom:14}}>
-          <input className="ce-input" placeholder="Rechercher résidence / type…" value={search} onChange={(e)=>setSearch(e.target.value)} style={{width:200}} />
-          <select className="ce-select" value={filterType} onChange={(e)=>setFilterType(e.target.value)}>
-            <option value="">Tous types de travaux</option>
+          <input className="ce-input" placeholder="Rechercher résidence / nature…" value={search} onChange={(e)=>setSearch(e.target.value)} style={{width:200}} />
+          <select className="ce-select" value={filterNature} onChange={(e)=>setFilterNature(e.target.value)}>
+            <option value="">Toutes natures de travaux</option>
             {typeOptions.map((t)=><option key={t} value={t}>{t}</option>)}
+          </select>
+          <select className="ce-select" value={filterTypeCat} onChange={(e)=>setFilterTypeCat(e.target.value)}>
+            <option value="">Tous types de travaux</option>
+            {TYPE_CAT_OPTIONS.map((t)=><option key={t} value={t}>{t}</option>)}
           </select>
           <select className="ce-select" value={filterStatut} onChange={(e)=>setFilterStatut(e.target.value)}>
             <option value="">Tous statuts</option>
@@ -2106,6 +2240,12 @@ function ViewInvestissements({residences, operations, setOperations, includeIden
 }
 
 /* ---------------- Décarbonation & DPE ---------------- */
+const CLASS_ORDER_AG = CLASS_ORDER.slice().reverse(); // A -> G
+function classRangeAG(lo, hi){
+  const i1 = CLASS_ORDER_AG.indexOf(lo), i2 = CLASS_ORDER_AG.indexOf(hi);
+  if (i1===-1 || i2===-1) return [];
+  return CLASS_ORDER_AG.slice(Math.min(i1,i2), Math.max(i1,i2)+1);
+}
 function ViewDecarbonation({residences, operations, gainsGrid, hasGainsGrid, includeIdentifiees, baseImport}){
   const [metric, setMetric] = useState('energie');
   const [compareView, setCompareView] = useState('overlay'); // 'overlay' | 'base' | 'actuel'
@@ -2120,6 +2260,22 @@ function ViewDecarbonation({residences, operations, gainsGrid, hasGainsGrid, inc
   const initial = trajectory ? trajectory[years[0]] : null;
   const final = trajectory ? trajectory[years[years.length-1]] : null;
   const bestShare = (d)=> d ? ((d.A+d.B+d.C) / Math.max(1, classes.reduce((s,c)=>s+d[c],0)) * 100) : null;
+  const rangeShare = (d, lo, hi)=>{
+    if (!d) return null;
+    const range = classRangeAG(lo, hi);
+    const num = range.reduce((s,c)=>s+(d[c]||0),0);
+    return (num / Math.max(1, classes.reduce((s,c)=>s+d[c],0))) * 100;
+  };
+
+  // §10 — carte configurable (remplace les deux cartes fixes "Logements A-C en <année de début/fin>") :
+  // la borne haute du sélecteur d'année suit la dernière année de la trajectoire actuellement affichée
+  // (pas une année calendaire codée en dur), et les deux sélecteurs de classe reproduisent n'importe
+  // quelle plage A-G (ex. "A-C", "E-G").
+  const [dpeCardYear, setDpeCardYear] = useState(null);
+  const [dpeCardLo, setDpeCardLo] = useState('A');
+  const [dpeCardHi, setDpeCardHi] = useState('C');
+  useEffect(()=>{ if (years.length && !years.includes(dpeCardYear)) setDpeCardYear(years[years.length-1]); }, [years]);
+  const dpeCardShare = trajectory && dpeCardYear!==null ? rangeShare(trajectory[dpeCardYear], dpeCardLo, dpeCardHi) : null;
 
   const hasCompareBase = !!(baseImport && baseImport.data.hasGainsGrid);
   const baseTrajectory = useMemo(()=>{
@@ -2148,9 +2304,31 @@ function ViewDecarbonation({residences, operations, gainsGrid, hasGainsGrid, inc
       )}
       {trajectory && (
         <React.Fragment>
-          <div style={{display:'flex',gap:16,flexWrap:'wrap'}}>
-            <KpiCard label={"Logements classe A-C en "+years[0]} value={bestShare(initial)!==null? bestShare(initial).toFixed(0)+'%':'—'} />
-            <KpiCard label={"Logements classe A-C en "+years[years.length-1]} value={bestShare(final)!==null? bestShare(final).toFixed(0)+'%':'—'} sub="Projection selon les opérations en cours de simulation" />
+          <div className="ce-card" style={{display:'flex',gap:16,flexWrap:'wrap',alignItems:'center'}}>
+            <div style={{flex:1,minWidth:150}}>
+              <div style={{fontSize:'.68rem',fontWeight:700,color:'var(--ce-vert-fonce)',textTransform:'uppercase',letterSpacing:'.03em',marginBottom:6}}>
+                Logements classe {dpeCardLo}{dpeCardLo!==dpeCardHi?('-'+dpeCardHi):''} en {dpeCardYear??''}
+              </div>
+              <div style={{fontSize:'1.7rem',fontWeight:700,color:'var(--ce-vert-principal)'}}>{dpeCardShare!==null? dpeCardShare.toFixed(0)+'%':'—'}</div>
+            </div>
+            <div style={{display:'flex',flexDirection:'column',gap:4}}>
+              <label style={{fontSize:'.66rem',fontWeight:700,color:'var(--ce-vert-fonce)',textTransform:'uppercase'}}>Année</label>
+              <select className="ce-select" value={dpeCardYear??''} onChange={(e)=>setDpeCardYear(Number(e.target.value))}>
+                {years.map((y)=><option key={y} value={y}>{y}</option>)}
+              </select>
+            </div>
+            <div style={{display:'flex',flexDirection:'column',gap:4}}>
+              <label style={{fontSize:'.66rem',fontWeight:700,color:'var(--ce-vert-fonce)',textTransform:'uppercase'}}>Classe (borne basse)</label>
+              <select className="ce-select" value={dpeCardLo} onChange={(e)=>setDpeCardLo(e.target.value)}>
+                {CLASS_ORDER_AG.map((c)=><option key={c} value={c}>{c}</option>)}
+              </select>
+            </div>
+            <div style={{display:'flex',flexDirection:'column',gap:4}}>
+              <label style={{fontSize:'.66rem',fontWeight:700,color:'var(--ce-vert-fonce)',textTransform:'uppercase'}}>Classe (borne haute)</label>
+              <select className="ce-select" value={dpeCardHi} onChange={(e)=>setDpeCardHi(e.target.value)}>
+                {CLASS_ORDER_AG.map((c)=><option key={c} value={c}>{c}</option>)}
+              </select>
+            </div>
           </div>
           <div className="ce-card">
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
@@ -2228,8 +2406,65 @@ function ViewDecarbonation({residences, operations, gainsGrid, hasGainsGrid, inc
    L'"Offre nouvelle" (construction neuve) n'a en revanche aucune source dans les fichiers fournis :
    à la demande de Jules, elle est portée par une simulation manuelle (saisie libre par année,
    même principe que la "Ligne budgétaire libre" de la vue Investissements), pas par un import. */
-function ViewOffreVente({residences, operations, offreNouvelleLgt, setOffreNouvelleLgt}){
+// §12 — dérivation lecture seule de la conventionnalité d'une résidence pour une entrée de vente
+// ajoutée manuellement : residence.conventionneVente si renseigné (donnée déjà présente dans la
+// Base de cotation pour les résidences déjà en plan de vente), sinon déduit de dont conventionné /
+// dont foyer (comptages déjà parsés), jamais une nouvelle saisie dupliquée dans l'entrée de vente.
+function deriveConventionne(r){
+  if (!r) return '—';
+  if (r.conventionneVente) return r.conventionneVente;
+  if (r.dontConventionne>0) return 'Conventionné';
+  if (r.dontFoyer>0) return 'Foyer / résidence sociale';
+  return '—';
+}
+function ViewOffreVente({residences, operations, offreNouvelleLgt, setOffreNouvelleLgt, ventesSimulees, setVentesSimulees}){
   const years = useMemo(()=>computeYearsRange(operations), [operations]);
+  const resByCode = useMemo(()=>{ const m={}; residences.forEach((r)=>m[r.code]=r); return m; }, [residences]);
+  const typeVenteSuggestions = useMemo(()=>uniqueSorted(residences.map((r)=>r.typeVente)), [residences]);
+
+  function addVente(){
+    if (!residences.length) return;
+    setVentesSimulees([{ id:'vente_'+Date.now(), resCode:null, typeVente:null, logementsRestants:null, prixVente:null, origine:'ajout' }].concat(ventesSimulees));
+  }
+  function updateVente(id, patch){ setVentesSimulees(ventesSimulees.map((v)=> v.id===id? Object.assign({},v,patch) : v)); }
+  function removeVente(id){ setVentesSimulees(ventesSimulees.filter((v)=>v.id!==id)); }
+  function selectVenteResidence(id, resCode, currentLogementsRestants){
+    const patch = { resCode };
+    // Pré-remplissage au moment de la sélection uniquement, jamais en repli permanent : une fois
+    // modifié manuellement par l'utilisateur, la valeur ne doit plus être écrasée par ce pré-remplissage.
+    if (currentLogementsRestants===null || currentLogementsRestants===undefined){
+      const r = resByCode[resCode];
+      if (r && r.nbLgtRestantVente!==null && r.nbLgtRestantVente!==undefined) patch.logementsRestants = r.nbLgtRestantVente;
+    }
+    updateVente(id, patch);
+  }
+
+  const ventesSimuleesCols = [
+    {key:'resCode', label:'Résidence', render:(v)=>{
+      const inList = residences.some((r)=>r.code===v.resCode);
+      return (
+        <select className="ce-select" value={v.resCode ?? ''} onChange={(e)=>selectVenteResidence(v.id, e.target.value, v.logementsRestants)}>
+          <option value="" disabled>— À sélectionner —</option>
+          {!inList && v.resCode && <option value={v.resCode}>{(resByCode[v.resCode]||{}).nom || v.resCode} (hors filtre)</option>}
+          {residences.map((r)=><option key={r.code} value={r.code}>{r.nom||r.code}</option>)}
+        </select>
+      );
+    }},
+    {key:'commune', label:'Commune', render:(v)=>(resByCode[v.resCode]||{}).commune || '—'},
+    {key:'conventionne', label:'Conventionné / non conventionné', render:(v)=>deriveConventionne(resByCode[v.resCode])},
+    {key:'typeVente', label:'Type de vente', render:(v)=>(
+      <input className="ce-input" style={{width:140}} list="ce-type-vente-suggestions" value={v.typeVente ?? ''} placeholder="— À sélectionner —"
+        onChange={(e)=>updateVente(v.id,{typeVente:e.target.value})} />
+    )},
+    {key:'logementsRestants', label:'Logements restants', render:(v)=><input className="ce-input" style={{width:90}} type="number" value={v.logementsRestants ?? ''} onChange={(e)=>updateVente(v.id,{logementsRestants: e.target.value===''? null: Number(e.target.value)})} />},
+    {key:'prixVente', label:'Prix de vente', render:(v)=><input className="ce-input" style={{width:110}} type="number" value={v.prixVente ?? ''} onChange={(e)=>updateVente(v.id,{prixVente: e.target.value===''? null: Number(e.target.value)})} />},
+    {key:'_montantM2', label:'Montant au m²', render:(v)=>{
+      const r = resByCode[v.resCode];
+      if (!r || !r.shab || r.shab<=0 || v.prixVente===null || v.prixVente===undefined) return '—';
+      return fmtEur(v.prixVente / r.shab);
+    }},
+    {key:'_actions', label:'', render:(v)=><button className="ce-btn-outline ce-btn-sm" onClick={()=>removeVente(v.id)}>Suppr.</button>},
+  ];
 
   const venteRows = useMemo(()=>residences.filter((r)=>
     r.nbLgtMiseVente!==null || r.prixVenteBrut!==null || r.typeVente!==null || r.planVente
@@ -2284,6 +2519,19 @@ function ViewOffreVente({residences, operations, offreNouvelleLgt, setOffreNouve
         }} options={{ scales:{ y:{ beginAtZero:true, title:{display:true,text:'Logements (année)'} }, y1:{ beginAtZero:true, position:'right', grid:{drawOnChartArea:false}, title:{display:true,text:'Cumul'} } } }} />
       </div>
 
+      <div className="ce-card">
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:10,marginBottom:12}}>
+          <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700}}>Ventes simulées ({ventesSimulees.length})</h2>
+          <button className="ce-btn ce-btn-sm" onClick={addVente} disabled={!residences.length} title={!residences.length? "Aucune résidence ne correspond aux filtres actifs" : ""}>+ Ajouter une vente</button>
+        </div>
+        <p style={{fontSize:'.72rem',color:'var(--ce-vert-fonce)',marginBottom:12,lineHeight:1.5}}>
+          Ajoute une entrée de vente pour une résidence déjà existante du patrimoine importé (pas une résidence fictive) —
+          en complément des résidences déjà en plan de vente listées ci-dessous.
+        </p>
+        <datalist id="ce-type-vente-suggestions">{typeVenteSuggestions.map((t)=><option key={t} value={t} />)}</datalist>
+        {ventesSimulees.length>0 ? <SortableTable columns={ventesSimuleesCols} rows={ventesSimulees} pageSize={20} /> : <div style={{fontSize:'.78rem',color:'#9fb3ae'}}>Aucune vente simulée pour l'instant.</div>}
+      </div>
+
       {hasVente ? (
         <React.Fragment>
           <div style={{display:'flex',gap:16,flexWrap:'wrap'}}>
@@ -2324,6 +2572,19 @@ function ViewFinance({residences, onSelectResidence}){
   const totalAuto = rows.reduce((s,r)=>s+(r.autofinancement||0),0);
   const totalVnc = rows.reduce((s,r)=>s+(r.vnc||0),0);
 
+  // §11 — moyenne pondérée au logement = somme(indicateur)/somme(nbLgt) sur le périmètre filtré,
+  // scopée aux résidences où l'indicateur est renseigné (pas la moyenne simple des colonnes "par
+  // lgt" déjà présentes dans le fichier, qui ne serait pas pondérée par la taille des résidences).
+  function weightedAvgPerLgt(key){
+    const scoped = residences.filter((r)=>r[key]!==null && r[key]!==undefined);
+    const totalLgt = scoped.reduce((s,r)=>s+(r.nbLgt||0),0);
+    if (totalLgt<=0) return null;
+    return scoped.reduce((s,r)=>s+(r[key]||0),0) / totalLgt;
+  }
+  const avgCrdLgt = weightedAvgPerLgt('crd');
+  const avgAutoLgt = weightedAvgPerLgt('autofinancement');
+  const avgVncLgt = weightedAvgPerLgt('vnc');
+
   const cols = [
     {key:'code', label:'Code'},
     {key:'nom', label:'Résidence'},
@@ -2337,8 +2598,11 @@ function ViewFinance({residences, onSelectResidence}){
     <div style={{padding:24,display:'flex',flexDirection:'column',gap:20}}>
       <div style={{display:'flex',gap:16,flexWrap:'wrap'}}>
         <KpiCard label="CRD total du patrimoine" value={fmtKEur(totalCrd)} sub={rows.length+" résidences renseignées"} />
+        <KpiCard label="CRD moyen pondéré / lgt" value={avgCrdLgt!==null? fmtEur(avgCrdLgt):'—'} />
         <KpiCard label="Autofinancement total" value={fmtKEur(totalAuto)} />
+        <KpiCard label="Autofinancement moyen pondéré / lgt" value={avgAutoLgt!==null? fmtEur(avgAutoLgt):'—'} />
         <KpiCard label="VNC totale" value={fmtKEur(totalVnc)} />
+        <KpiCard label="VNC moyenne pondérée / lgt" value={avgVncLgt!==null? fmtEur(avgVncLgt):'—'} />
       </div>
       <div className="ce-card" style={{background:'var(--ce-saumon)'}}>
         <p style={{fontSize:'.72rem',color:'var(--ce-vert-fonce)',lineHeight:1.5,margin:0}}>
@@ -2379,7 +2643,12 @@ function pivotAggregate(items, metric){
   return vals.length? vals.reduce((a,b)=>a+b,0)/vals.length : null;
 }
 
-function ViewPivot({residences, operations}){
+// §13 — Analyse libre : direction validée avec Jules (multi-métriques côte à côte, drill-down au
+// clic vers la liste résidences/opérations d'une cellule avec lien vers la fiche résidence, tri des
+// lignes au clic sur un en-tête, heatmap optionnelle, champs enrichis, presets de croisements
+// rapides). Priorisation fine et détail visuel (heatmap, presets) non arbitrés avec Jules : traité en
+// dernier, implémentation volontairement simple plutôt que de deviner un détail non validé.
+function ViewPivot({residences, operations, onSelectResidence}){
   const [dataset, setDataset] = useState('residences');
   const resByCode = useMemo(()=>{ const m={}; residences.forEach((r)=>m[r.code]=r); return m; }, [residences]);
 
@@ -2387,6 +2656,7 @@ function ViewPivot({residences, operations}){
     {key:'commune', label:'Commune', get:(r)=>r.commune||'Non renseignée'},
     {key:'secteur', label:'Secteur / agence', get:(r)=>r.secteur||r.agence||'Non renseigné'},
     {key:'qpv', label:'QPV', get:(r)=>r.qpv||'Non renseigné'},
+    {key:'financement', label:'Financement', get:(r)=>r.financement||'Non renseigné'},
     {key:'familleAttract', label:'Famille attractivité', get:(r)=>r.familleAttract? ('Famille '+r.familleAttract):'Non renseignée'},
     {key:'familleTechnique', label:'Famille état technique', get:(r)=>r.familleTechnique? ('Famille '+r.familleTechnique):'Non renseignée'},
     {key:'dpeEnergie', label:'DPE Énergie', get:(r)=>r.dpeEnergie||'Non renseigné'},
@@ -2397,6 +2667,9 @@ function ViewPivot({residences, operations}){
     {key:'count', label:'Nombre de résidences', agg:'count', fmt:fmtNum},
     {key:'attractivite_avg', label:'Attractivité moyenne', agg:'avg', get:(r)=>r.attractivite, fmt:(v)=>v!==null?v.toFixed(1):'—'},
     {key:'technique_avg', label:'État technique moyen', agg:'avg', get:(r)=>r.technique, fmt:(v)=>v!==null?v.toFixed(1):'—'},
+    {key:'crd_sum', label:'CRD total', agg:'sum', get:(r)=>r.crd||0, fmt:fmtEur},
+    {key:'autofinancement_sum', label:'Autofinancement total', agg:'sum', get:(r)=>r.autofinancement||0, fmt:fmtEur},
+    {key:'vnc_sum', label:'VNC totale', agg:'sum', get:(r)=>r.vnc||0, fmt:fmtEur},
   ], []);
   const OPERATION_FIELDS = useMemo(()=>[
     {key:'type', label:'Type de travaux', get:(o)=>o.type||'Non renseigné'},
@@ -2417,16 +2690,35 @@ function ViewPivot({residences, operations}){
 
   const [rowKey, setRowKey] = useState(fields[0].key);
   const [colKey, setColKey] = useState('');
-  const [metricKey, setMetricKey] = useState(metrics[0].key);
+  const [metricKeys, setMetricKeys] = useState([metrics[0].key]);
+  const [heatmap, setHeatmap] = useState(false);
+  const [sortIdx, setSortIdx] = useState(null);
+  const [sortDir, setSortDir] = useState(-1);
+  const [drillIdx, setDrillIdx] = useState(null); // {rowIdx, cellIdx} de la cellule dépliée
 
   useEffect(()=>{
-    setRowKey(fields[0].key); setColKey(''); setMetricKey(metrics[0].key);
+    setRowKey(fields[0].key); setColKey(''); setMetricKeys([metrics[0].key]); setSortIdx(null); setDrillIdx(null);
     // eslint-disable-next-line
   }, [dataset]);
 
   const rowField = fields.find((f)=>f.key===rowKey) || fields[0];
   const colField = colKey ? fields.find((f)=>f.key===colKey) : null;
-  const metric = metrics.find((m)=>m.key===metricKey) || metrics[0];
+  const selectedMetrics = metrics.filter((m)=>metricKeys.includes(m.key));
+  const activeMetrics = selectedMetrics.length? selectedMetrics : [metrics[0]];
+
+  function toggleMetric(key){
+    setMetricKeys((cur)=> cur.includes(key) ? (cur.length>1? cur.filter((k)=>k!==key) : cur) : cur.concat([key]));
+    setSortIdx(null);
+  }
+
+  const PRESETS = dataset==='residences' ? [
+    {label:'Commune × DPE Énergie (logements)', apply:()=>{ setRowKey('commune'); setColKey('dpeEnergie'); setMetricKeys(['nbLgt_sum']); }},
+    {label:'Famille attractivité × État technique', apply:()=>{ setRowKey('familleAttract'); setColKey('familleTechnique'); setMetricKeys(['count']); }},
+    {label:'Commune — CRD / Autofinancement / VNC', apply:()=>{ setRowKey('commune'); setColKey(''); setMetricKeys(['crd_sum','autofinancement_sum','vnc_sum']); }},
+  ] : [
+    {label:'Année × Type de travaux (montant)', apply:()=>{ setRowKey('annee'); setColKey('type'); setMetricKeys(['montant_sum']); }},
+    {label:'Statut × Année (nombre)', apply:()=>{ setRowKey('statut'); setColKey('annee'); setMetricKeys(['count']); }},
+  ];
 
   const pivot = useMemo(()=>{
     const rowGroups = {};
@@ -2438,40 +2730,66 @@ function ViewPivot({residences, operations}){
       items.forEach((it)=>s.add(String(colField.get(it))));
       colKeys = Array.from(s).sort((a,b)=>a.localeCompare(b,'fr'));
     }
-    const cellFor = (rk, ck) => {
+    const subsetFor = (rk, ck) => {
       const rowItems = rowGroups[rk] || [];
-      const subset = colField ? rowItems.filter((it)=>String(colField.get(it))===ck) : rowItems;
-      return pivotAggregate(subset, metric);
+      return colField ? rowItems.filter((it)=>String(colField.get(it))===ck) : rowItems;
     };
     const rows = rowKeys.map((rk)=>({
       key: rk,
-      cells: colKeys.map((ck)=>cellFor(rk, ck)),
-      total: pivotAggregate(rowGroups[rk]||[], metric),
+      cells: colKeys.flatMap((ck)=> activeMetrics.map((m)=>({
+        value: pivotAggregate(subsetFor(rk,ck), m), items: subsetFor(rk,ck), colKey: ck, metric: m,
+      }))),
     }));
-    const colTotals = colKeys.map((ck)=>{
+    const colTotals = colKeys.flatMap((ck)=>{
       const subset = colField ? items.filter((it)=>String(colField.get(it))===ck) : items;
-      return pivotAggregate(subset, metric);
+      return activeMetrics.map((m)=>pivotAggregate(subset, m));
     });
-    const grandTotal = pivotAggregate(items, metric);
-    return { rowKeys, colKeys, rows, colTotals, grandTotal };
-  }, [items, rowField, colField, metric]);
+    return { rowKeys, colKeys, rows, colTotals };
+  }, [items, rowField, colField, activeMetrics]);
 
-  function fmtCell(v){
-    if (v===null||v===undefined) return '—';
-    return metric.fmt ? metric.fmt(v) : fmtNum(v);
+  const sortedRows = useMemo(()=>{
+    if (sortIdx===null) return pivot.rows;
+    const copy = pivot.rows.slice();
+    copy.sort((a,b)=>{
+      const va=a.cells[sortIdx].value, vb=b.cells[sortIdx].value;
+      if (va===null||va===undefined) return 1; if (vb===null||vb===undefined) return -1;
+      return (va-vb)*sortDir;
+    });
+    return copy;
+  }, [pivot.rows, sortIdx, sortDir]);
+
+  function toggleSort(idx){ if (sortIdx===idx) setSortDir(sortDir*-1); else { setSortIdx(idx); setSortDir(-1); } }
+
+  const colMax = useMemo(()=>{
+    const max = [];
+    (pivot.rows[0]? pivot.rows[0].cells : []).forEach((_,i)=>{
+      const vals = pivot.rows.map((r)=>r.cells[i].value).filter((v)=>v!==null&&v!==undefined&&!isNaN(v));
+      max[i] = vals.length? Math.max(...vals.map(Math.abs)) : 0;
+    });
+    return max;
+  }, [pivot.rows]);
+
+  function fmtCell(cell){
+    if (cell.value===null||cell.value===undefined) return '—';
+    return cell.metric.fmt ? cell.metric.fmt(cell.value) : fmtNum(cell.value);
   }
 
   function exportCsv(){
-    const header = [''].concat(pivot.colKeys.map((ck)=> ck==='__all__' ? metric.label : ck)).concat(colField ? ['Total'] : []);
-    const rows = pivot.rows.map((r)=>[r.key].concat(r.cells.map((c)=>c===null?'':c)).concat(colField? [r.total===null?'':r.total] : []));
-    const totalRow = ['Total'].concat(pivot.colTotals.map((c)=>c===null?'':c)).concat(colField? [pivot.grandTotal===null?'':pivot.grandTotal] : []);
+    const header = [''].concat(pivot.colKeys.flatMap((ck)=> activeMetrics.map((m)=> colField? (ck+' — '+m.label) : m.label)));
+    const rows = sortedRows.map((r)=>[r.key].concat(r.cells.map((c)=>c.value===null?'':c.value)));
+    const totalRow = ['Total'].concat(pivot.colTotals.map((c)=>c===null?'':c));
     downloadCsv('pivot_'+dataset+'.csv', [header].concat(rows).concat([totalRow]));
   }
+
+  const drillCell = drillIdx!==null ? sortedRows[drillIdx.rowIdx].cells[drillIdx.cellIdx] : null;
 
   return (
     <div style={{padding:24,display:'flex',flexDirection:'column',gap:20}}>
       <div className="ce-card">
         <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700,marginBottom:14}}>Tableau croisé dynamique</h2>
+        <div style={{display:'flex',gap:6,flexWrap:'wrap',marginBottom:14}}>
+          {PRESETS.map((p)=><button key={p.label} className="ce-btn-outline ce-btn-sm" onClick={p.apply}>{p.label}</button>)}
+        </div>
         <div style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'flex-end'}}>
           <div style={{display:'flex',flexDirection:'column',gap:4}}>
             <label style={{fontSize:'.68rem',fontWeight:700,color:'var(--ce-vert-fonce)',textTransform:'uppercase'}}>Jeu de données</label>
@@ -2482,23 +2800,30 @@ function ViewPivot({residences, operations}){
           </div>
           <div style={{display:'flex',flexDirection:'column',gap:4}}>
             <label style={{fontSize:'.68rem',fontWeight:700,color:'var(--ce-vert-fonce)',textTransform:'uppercase'}}>Lignes</label>
-            <select className="ce-select" value={rowKey} onChange={(e)=>setRowKey(e.target.value)}>
+            <select className="ce-select" value={rowKey} onChange={(e)=>{setRowKey(e.target.value); setSortIdx(null);}}>
               {fields.map((f)=><option key={f.key} value={f.key}>{f.label}</option>)}
             </select>
           </div>
           <div style={{display:'flex',flexDirection:'column',gap:4}}>
             <label style={{fontSize:'.68rem',fontWeight:700,color:'var(--ce-vert-fonce)',textTransform:'uppercase'}}>Colonnes</label>
-            <select className="ce-select" value={colKey} onChange={(e)=>setColKey(e.target.value)}>
+            <select className="ce-select" value={colKey} onChange={(e)=>{setColKey(e.target.value); setSortIdx(null);}}>
               <option value="">Aucune (total uniquement)</option>
               {fields.filter((f)=>f.key!==rowKey).map((f)=><option key={f.key} value={f.key}>{f.label}</option>)}
             </select>
           </div>
           <div style={{display:'flex',flexDirection:'column',gap:4}}>
-            <label style={{fontSize:'.68rem',fontWeight:700,color:'var(--ce-vert-fonce)',textTransform:'uppercase'}}>Valeur</label>
-            <select className="ce-select" value={metricKey} onChange={(e)=>setMetricKey(e.target.value)}>
-              {metrics.map((m)=><option key={m.key} value={m.key}>{m.label}</option>)}
-            </select>
+            <label style={{fontSize:'.68rem',fontWeight:700,color:'var(--ce-vert-fonce)',textTransform:'uppercase'}}>Valeurs (une ou plusieurs)</label>
+            <div style={{display:'flex',gap:8,flexWrap:'wrap',maxWidth:340}}>
+              {metrics.map((m)=>(
+                <label key={m.key} style={{fontSize:'.72rem',color:'var(--ce-vert-fonce)',display:'flex',alignItems:'center',gap:4,cursor:'pointer'}}>
+                  <input type="checkbox" checked={metricKeys.includes(m.key)} onChange={()=>toggleMetric(m.key)} />{m.label}
+                </label>
+              ))}
+            </div>
           </div>
+          <label style={{fontSize:'.78rem',color:'var(--ce-vert-fonce)',display:'flex',alignItems:'center',gap:6,cursor:'pointer'}}>
+            <input type="checkbox" checked={heatmap} onChange={(e)=>setHeatmap(e.target.checked)} />Heatmap
+          </label>
           <button className="ce-btn-outline ce-btn-sm" onClick={exportCsv}>Exporter en CSV</button>
         </div>
       </div>
@@ -2509,34 +2834,65 @@ function ViewPivot({residences, operations}){
             <thead>
               <tr>
                 <th>{rowField.label}</th>
-                {pivot.colKeys.map((ck)=>(<th key={ck}>{ck==='__all__'? metric.label : ck}</th>))}
-                {colField && <th>Total</th>}
+                {pivot.colKeys.flatMap((ck)=>activeMetrics.map((m,mi)=>{
+                  const idx = pivot.colKeys.indexOf(ck)*activeMetrics.length + mi;
+                  return (
+                    <th key={ck+'_'+m.key} onClick={()=>toggleSort(idx)}>
+                      {colField? (ck+' — '+m.label) : m.label}{sortIdx===idx? (sortDir>0?' ▲':' ▼'):''}
+                    </th>
+                  );
+                }))}
               </tr>
             </thead>
             <tbody>
-              {pivot.rows.map((r)=>(
+              {sortedRows.map((r,ri)=>(
                 <tr key={r.key}>
                   <td style={{fontWeight:600}}>{r.key}</td>
-                  {r.cells.map((c,i)=>(<td key={i}>{fmtCell(c)}</td>))}
-                  {colField && <td style={{fontWeight:700}}>{fmtCell(r.total)}</td>}
+                  {r.cells.map((c,ci)=>{
+                    const alpha = heatmap && colMax[ci]>0 && c.value!==null ? Math.min(1, Math.abs(c.value)/colMax[ci]) : 0;
+                    const isOpen = drillIdx && drillIdx.rowIdx===ri && drillIdx.cellIdx===ci;
+                    return (
+                      <td key={ci} onClick={()=>setDrillIdx(isOpen? null : {rowIdx:ri, cellIdx:ci})}
+                        style={{cursor:'pointer', background: heatmap? 'rgba(0,146,97,'+(0.08+0.5*alpha).toFixed(2)+')' : (isOpen? 'var(--ce-vert-tres-clair)':undefined)}}>
+                        {fmtCell(c)}
+                      </td>
+                    );
+                  })}
                 </tr>
               ))}
-              {pivot.rows.length===0 && <tr><td colSpan={pivot.colKeys.length+2} style={{textAlign:'center',color:'#9fb3ae',padding:20}}>Aucune donnée pour ce jeu.</td></tr>}
+              {sortedRows.length===0 && <tr><td colSpan={pivot.colKeys.length*activeMetrics.length+1} style={{textAlign:'center',color:'#9fb3ae',padding:20}}>Aucune donnée pour ce jeu.</td></tr>}
             </tbody>
-            {pivot.rows.length>0 && (
+            {sortedRows.length>0 && (
               <tfoot>
                 <tr style={{fontWeight:700,background:'var(--ce-vert-tres-clair)',borderTop:'2px solid var(--ce-vert-pastel)'}}>
                   <td style={{padding:'7px 10px'}}>Total</td>
-                  {pivot.colTotals.map((c,i)=>(<td key={i} style={{padding:'7px 10px'}}>{fmtCell(c)}</td>))}
-                  {colField && <td style={{padding:'7px 10px'}}>{fmtCell(pivot.grandTotal)}</td>}
+                  {pivot.colTotals.map((c,i)=>(<td key={i} style={{padding:'7px 10px'}}>{c===null? '—' : (activeMetrics[i%activeMetrics.length].fmt? activeMetrics[i%activeMetrics.length].fmt(c) : fmtNum(c))}</td>))}
                 </tr>
               </tfoot>
             )}
           </table>
         </div>
+        {drillCell && (
+          <div style={{marginTop:14,border:'1px solid #eef4f2',borderRadius:8,padding:'10px 14px',maxHeight:280,overflowY:'auto'}}>
+            <div style={{fontSize:'.78rem',fontWeight:700,color:'var(--ce-vert-tres-fonce)',marginBottom:8}}>
+              {drillCell.items.length} élément{drillCell.items.length>1?'s':''} dans cette cellule
+            </div>
+            {drillCell.items.length===0 && <div style={{fontSize:'.76rem',color:'#9fb3ae'}}>Aucun élément.</div>}
+            {drillCell.items.slice(0,200).map((it,i)=>{
+              const r = dataset==='residences' ? it : resByCode[it.resCode];
+              const label = dataset==='residences' ? (it.nom||it.code) : ((r&&r.nom)||it.resCode)+' — '+(it.nature||it.type||'Non renseigné')+' ('+(it.annee||'n.c.')+')';
+              return (
+                <div key={i} onClick={()=>r && onSelectResidence && onSelectResidence(r)} style={{fontSize:'.76rem',color:'var(--ce-vert-fonce)',padding:'3px 0',borderBottom:'1px solid #f0f5f3',cursor:(r&&onSelectResidence)?'pointer':'default'}}>
+                  {label}
+                </div>
+              );
+            })}
+            {drillCell.items.length>200 && <div style={{fontSize:'.7rem',color:'#9fb3ae',marginTop:6}}>… et {drillCell.items.length-200} de plus (affinez les filtres transverses pour réduire la liste).</div>}
+          </div>
+        )}
         <p style={{fontSize:'.7rem',color:'var(--ce-vert-fonce)',marginTop:10,lineHeight:1.5}}>
           Le tableau croisé s'applique sur les données déjà filtrées par la barre de filtres transverses (pour les résidences),
-          et se recalcule entièrement dans votre navigateur.
+          et se recalcule entièrement dans votre navigateur. Cliquez sur une cellule pour voir le détail, sur un en-tête pour trier.
         </p>
       </div>
     </div>
@@ -2598,7 +2954,7 @@ function CriteresBarChart({title, values, residences, groupKey}){
       <ChartCanvas type="bar" height={Math.max(180, known.length*32)} data={{
         labels: known.map((v)=>v.label),
         datasets:[
-          { type:'bar', label:'Résidence', data: known.map((v)=>v.value), backgroundColor:'#009261', borderRadius:4 },
+          { type:'bar', label:'Résidence', data: known.map((v)=>v.value), backgroundColor:'rgba(0,146,97,0.38)', borderRadius:4 },
           { type:'line', label:'Moyenne du parc filtré', data: parcAvg, borderColor:'#FF8364', backgroundColor:'#FF8364', pointRadius:3, fill:false },
         ]
       }} options={{ indexAxis:'y', scales:{ x:{ min:0, max:100 } } }} />
@@ -2657,7 +3013,7 @@ function ViewComparatif({currentSnapshot}){
     if (id==='current') return currentSnapshot;
     const s = saves.find((x)=>x.id===id);
     if (!s) return null;
-    return { nom:s.nom, data:s.data, simOperations:s.simOperations||[], budgetLibre:s.budgetLibre||{}, includeIdentifiees: s.includeIdentifiees!==undefined?s.includeIdentifiees:true, nomFichierSource:s.nomFichierSource, gabaritComplet:s.gabaritComplet };
+    return { nom:s.nom, data:s.data, simOperations:s.simOperations||[], budgetLignes: migrateBudgetLignes(s), includeIdentifiees: s.includeIdentifiees!==undefined?s.includeIdentifiees:true, nomFichierSource:s.nomFichierSource, gabaritComplet:s.gabaritComplet };
   }
 
   const versionA = versionAId? resolveVersion(versionAId) : null;
@@ -2667,7 +3023,7 @@ function ViewComparatif({currentSnapshot}){
   function kpiOf(v){
     if (!v) return null;
     const totalLgt = v.data.residences.reduce((s,r)=>s+r.nbLgt,0);
-    const totalInvest = v.simOperations.reduce((s,o)=>s+(o.montant||0),0) + Object.values(v.budgetLibre||{}).reduce((s,x)=>s+(Number(x)||0),0);
+    const totalInvest = v.simOperations.reduce((s,o)=>s+(o.montant||0),0) + (v.budgetLignes||[]).reduce((s,l)=>s+Object.values(l.valeurs||{}).reduce((s2,x)=>s2+(Number(x)||0),0),0);
     const dpeTotals = {A:0,B:0,C:0,D:0,E:0,F:0,G:0,NR:0};
     v.data.residences.forEach((r)=>{ if (r.distEnergie) Object.keys(dpeTotals).forEach((k)=>{ dpeTotals[k]+=(r.distEnergie[k]||0); }); });
     return { totalLgt, nbRes:v.data.residences.length, totalInvest, dpeTotals };
@@ -2687,7 +3043,7 @@ function ViewComparatif({currentSnapshot}){
   function investByYear(v){
     if (!v) return [];
     const ops = v.simOperations.filter((o)=> v.includeIdentifiees || o.statut==='programme');
-    return years.map((y)=> ops.filter((o)=>o.annee===y).reduce((s,o)=>s+(o.montant||0),0) + (Number((v.budgetLibre||{})[y])||0));
+    return years.map((y)=> ops.filter((o)=>o.annee===y).reduce((s,o)=>s+(o.montant||0),0) + sumBudgetLignesYear(v.budgetLignes, y));
   }
   const investA = useMemo(()=>investByYear(versionA), [versionA, years]);
   const investB = useMemo(()=>investByYear(versionB), [versionB, years]);
@@ -2826,7 +3182,7 @@ function ViewComparatif({currentSnapshot}){
 }
 
 /* ---------------- Fiche résidence (drill-down) ---------------- */
-function ResidenceDrawer({residence, operations, residences, onClose}){
+function ResidenceDrawer({residence, operations, residences, onClose, gainsGrid, hasGainsGrid, includeIdentifiees}){
   const [tab, setTab] = useState('synthese');
   // Les hooks doivent s'exécuter à chaque rendu dans le même ordre : le "return null" pour
   // l'absence de résidence sélectionnée doit donc venir APRÈS tous les hooks, jamais avant
@@ -2837,6 +3193,19 @@ function ResidenceDrawer({residence, operations, residences, onClose}){
   }, [residences]);
   const quadrantAttractTechnique = useMemo(()=> (residence && residences && residences.length) ? segmentationQuadrant(residences,'attractivite','technique',residence) : null, [residences, residence]);
   const quadrantClimatTechnique = useMemo(()=> (residence && residences && residences.length && climatNoteKey) ? segmentationQuadrant(residences, climatNoteKey, 'technique', residence) : null, [residences, residence, climatNoteKey]);
+  // §6 — projection DPE post-travaux à horizon 10 ans, restreinte aux opérations de cette résidence.
+  // Année de référence = début de la trajectoire propre à cette résidence (pas une année calendaire
+  // fixe), en réutilisant la même cascade que la trajectoire de décarbonation globale (computeTrajectory).
+  const dpeHorizon = useMemo(()=>{
+    if (!residence || !hasGainsGrid) return null;
+    const resOps = (operations||[]).filter((o)=>o.resCode===residence.code);
+    const startYear = computeYearsRange(resOps)[0];
+    const endYear = startYear + 10;
+    const seq = []; for (let y=startYear;y<=endYear;y++) seq.push(y);
+    const trajE = computeTrajectory([residence], resOps, gainsGrid||{}, seq, 'energie', includeIdentifiees);
+    const trajG = computeTrajectory([residence], resOps, gainsGrid||{}, seq, 'ges', includeIdentifiees);
+    return { startYear, endYear, avantE: trajE[startYear], apresE: trajE[endYear], avantG: trajG[startYear], apresG: trajG[endYear] };
+  }, [residence, operations, gainsGrid, hasGainsGrid, includeIdentifiees]);
 
   if (!residence) return null;
   const ops = operations.filter((o)=>o.resCode===residence.code).sort((a,b)=>(a.annee||9999)-(b.annee||9999));
@@ -2851,7 +3220,6 @@ function ResidenceDrawer({residence, operations, residences, onClose}){
 
   const tabs = [
     {id:'synthese', label:'Synthèse'},
-    {id:'travaux', label:'Besoins de travaux'},
     {id:'actions', label:'Actions stratégiques'},
     {id:'suivi', label:'Suivi / commentaire'},
   ];
@@ -2887,7 +3255,30 @@ function ResidenceDrawer({residence, operations, residences, onClose}){
                   <div><b>Nb logements :</b> {fmtNum(residence.nbLgt)}</div>
                   {residence.adresse && <div style={{gridColumn:'1 / -1'}}><b>Adresse :</b> {residence.adresse}</div>}
                   {residence.qpv && <div><b>QPV :</b> {residence.qpv}</div>}
+                  {residence.codeInsee && <div><b>Code INSEE :</b> {residence.codeInsee}</div>}
+                  {residence.anneeConstruction && <div><b>Année de construction :</b> {residence.anneeConstruction}</div>}
+                  {residence.shab!==null && <div><b>SHAB :</b> {fmtNum(residence.shab)} m²</div>}
+                  {residence.corpro && <div><b>Copro :</b> {residence.corpro}</div>}
+                  {residence.tauxVacance!==null && <div><b>Taux de vacance :</b> {residence.tauxVacance}%</div>}
+                  {residence.autofinancementLgt!==null && <div><b>Autofinancement / lgt :</b> {fmtEur(residence.autofinancementLgt)}</div>}
                 </div>
+                {(residence.distEnergie || residence.distGES) && (
+                  <div style={{marginTop:14}}>
+                    <h4 style={{fontSize:'.72rem',fontWeight:700,marginBottom:6,color:'var(--ce-vert-fonce)',textTransform:'uppercase'}}>Répartition DPE</h4>
+                    <table className="ce-table">
+                      <thead><tr><th>Classe</th><th>Énergie</th><th>GES</th></tr></thead>
+                      <tbody>
+                        {['A','B','C','D','E','F','G','NR'].map((cl)=>(
+                          <tr key={cl}>
+                            <td><DpeBadge cl={cl}/></td>
+                            <td>{residence.distEnergie? fmtNum(residence.distEnergie[cl]||0):'—'}</td>
+                            <td>{residence.distGES? fmtNum(residence.distGES[cl]||0):'—'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
               {(residence.crd!==null || residence.autofinancement!==null || residence.vnc!==null) && (
                 <div className="ce-card">
@@ -2942,7 +3333,7 @@ function ResidenceDrawer({residence, operations, residences, onClose}){
                   <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
                     {identifieesTop4.map((o)=>(
                       <div key={o.id} style={{border:'1px solid #eef4f2',borderRadius:8,padding:'10px 12px'}}>
-                        <div style={{fontWeight:700,fontSize:'.8rem',color:'var(--ce-vert-tres-fonce)'}}>{o.type}</div>
+                        <div style={{fontWeight:700,fontSize:'.8rem',color:'var(--ce-vert-tres-fonce)'}}>{o.nature || o.type || 'Non renseigné'}</div>
                         <div style={{fontSize:'.72rem',color:'var(--ce-vert-fonce)',marginTop:4}}>{o.annee||'année n.c.'}{o.logements? ' · '+fmtNum(o.logements)+' lgt':''}</div>
                         <div style={{fontSize:'.78rem',fontWeight:700,color:'var(--ce-corail)',marginTop:2}}>{fmtEur(o.montant)}</div>
                       </div>
@@ -2958,33 +3349,55 @@ function ResidenceDrawer({residence, operations, residences, onClose}){
               )}
             </div>
           )}
-          {tab==='travaux' && (
-            <div className="ce-card">
-              <table className="ce-table">
-                <thead><tr><th>Type</th><th>Statut</th><th>Année</th><th>Montant</th></tr></thead>
-                <tbody>
-                  {ops.map((o)=>(<tr key={o.id}><td>{o.type}</td><td>{o.statut==='programme'?'Programmé':'Identifié'}</td><td>{o.annee??'—'}</td><td>{fmtEur(o.montant)}</td></tr>))}
-                  {ops.length===0 && <tr><td colSpan={4} style={{textAlign:'center',color:'#9fb3ae',padding:16}}>Aucune opération recensée pour cette résidence.</td></tr>}
-                </tbody>
-              </table>
-            </div>
-          )}
           {tab==='actions' && (
             <div style={{display:'flex',flexDirection:'column',gap:16}}>
               <div>
                 <h3 style={{fontSize:'.8rem',fontWeight:700,marginBottom:8,color:'var(--ce-vert-principal)'}}>Actions arbitrées ({programmees.length})</h3>
                 {programmees.map((o)=>(<div key={o.id} className="ce-card" style={{marginBottom:8,borderLeft:'4px solid var(--ce-vert-principal)'}}>
-                  <b>{o.type}</b> — {o.annee||'année n.c.'} — {fmtEur(o.montant)}
+                  <b>{o.nature || o.type || 'Non renseigné'}</b> — {o.annee||'année n.c.'}{o.anneeFin? ' → '+o.anneeFin:''} — {fmtEur(o.montant)}
+                  {o.logements>0 && o.montant!==null && o.montant!==undefined && <span style={{color:'#9fb3ae'}}> ({fmtEur(o.montant/o.logements)}/lgt)</span>}
                 </div>))}
                 {programmees.length===0 && <div style={{fontSize:'.78rem',color:'#9fb3ae'}}>Aucune.</div>}
               </div>
               <div>
                 <h3 style={{fontSize:'.8rem',fontWeight:700,marginBottom:8,color:'var(--ce-corail)'}}>Actions à arbitrer ({identifiees.length})</h3>
                 {identifiees.map((o)=>(<div key={o.id} className="ce-card" style={{marginBottom:8,borderLeft:'4px solid var(--ce-corail)'}}>
-                  <b>{o.type}</b> — {o.annee||'année n.c.'} — {fmtEur(o.montant)}
+                  <b>{o.nature || o.type || 'Non renseigné'}</b> — {o.annee||'année n.c.'}{o.anneeFin? ' → '+o.anneeFin:''} — {fmtEur(o.montant)}
+                  {o.logements>0 && o.montant!==null && o.montant!==undefined && <span style={{color:'#9fb3ae'}}> ({fmtEur(o.montant/o.logements)}/lgt)</span>}
                 </div>))}
                 {identifiees.length===0 && <div style={{fontSize:'.78rem',color:'#9fb3ae'}}>Aucune.</div>}
               </div>
+              {dpeHorizon && (
+                <div className="ce-card">
+                  <h3 style={{fontSize:'.8rem',fontWeight:700,marginBottom:10}}>Projection DPE à 10 ans ({dpeHorizon.startYear} → {dpeHorizon.endYear})</h3>
+                  <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16}}>
+                    <table className="ce-table">
+                      <thead><tr><th>Énergie</th><th>{dpeHorizon.startYear}</th><th>{dpeHorizon.endYear}</th></tr></thead>
+                      <tbody>
+                        {['A','B','C','D','E','F','G','NR'].map((cl)=>(
+                          <tr key={cl}><td><DpeBadge cl={cl}/></td><td>{fmtNum(dpeHorizon.avantE[cl]||0)}</td><td>{fmtNum(dpeHorizon.apresE[cl]||0)}</td></tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    <table className="ce-table">
+                      <thead><tr><th>GES</th><th>{dpeHorizon.startYear}</th><th>{dpeHorizon.endYear}</th></tr></thead>
+                      <tbody>
+                        {['A','B','C','D','E','F','G','NR'].map((cl)=>(
+                          <tr key={cl}><td><DpeBadge cl={cl}/></td><td>{fmtNum(dpeHorizon.avantG[cl]||0)}</td><td>{fmtNum(dpeHorizon.apresG[cl]||0)}</td></tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <p style={{fontSize:'.68rem',color:'var(--ce-vert-fonce)',marginTop:10,lineHeight:1.5}}>
+                    Projection selon les opérations de cette résidence (bascule « Inclure les opérations identifiées » prise en compte), même méthodologie de cascade que la trajectoire de décarbonation globale (§8.2).
+                  </p>
+                </div>
+              )}
+              {!dpeHorizon && (
+                <div className="ce-card" style={{background:'var(--ce-saumon)'}}>
+                  Grille de gains DPE introuvable dans ce fichier : la projection à 10 ans n'est pas disponible pour cette résidence.
+                </div>
+              )}
             </div>
           )}
           {tab==='suivi' && (
@@ -3002,11 +3415,12 @@ function ResidenceDrawer({residence, operations, residences, onClose}){
 function App(){
   const [data, setData] = useState(null);
   const [simOperations, setSimOperationsRaw] = useState([]);
-  const [budgetLibre, setBudgetLibreRaw] = useState({});
+  const [budgetLignes, setBudgetLignesRaw] = useState([]);
   const [offreNouvelleLgt, setOffreNouvelleLgtRaw] = useState({});
+  const [ventesSimulees, setVentesSimuleesRaw] = useState([]);
   const [includeIdentifiees, setIncludeIdentifiees] = useState(true);
   const [dirty, setDirty] = useState(false);
-  const [filters, setFilters] = useState({commune:'',secteur:'',famille:'',dpe:''});
+  const [filters, setFilters] = useState({commune:'',secteur:'',famille:'',dpe:'',qpv:''});
   const [activeTab, setActiveTab] = useState('ensemble');
   const [selectedResidence, setSelectedResidence] = useState(null);
   const [currentSaveId, setCurrentSaveId] = useState(null); // id de la sauvegarde IndexedDB dont provient l'import actuellement ouvert (null si import Excel frais)
@@ -3020,7 +3434,8 @@ function App(){
     let cancelled = false;
     (async()=>{
       const all = await idbGetAll();
-      const base = all.find((r)=>r.estBase) || null;
+      const baseRaw = all.find((r)=>r.estBase) || null;
+      const base = baseRaw? Object.assign({}, baseRaw, {budgetLignes: migrateBudgetLignes(baseRaw)}) : null;
       if (!cancelled){ setBaseImport(base); setSavesCount(all.length); }
     })();
     return ()=>{ cancelled = true; };
@@ -3029,8 +3444,9 @@ function App(){
   function onLoaded(d){
     setData(d);
     setSimOperationsRaw(d.operations.map((o)=>Object.assign({},o)));
-    setBudgetLibreRaw({});
+    setBudgetLignesRaw([]);
     setOffreNouvelleLgtRaw({});
+    setVentesSimuleesRaw([]);
     setDirty(false);
     setActiveTab('ensemble');
     setSelectedResidence(null);
@@ -3038,27 +3454,29 @@ function App(){
     // Sans cette réinitialisation, un filtre laissé actif sur un import précédent (ex. Classe DPE)
     // reste appliqué silencieusement au nouveau fichier importé, qui peut sembler avoir beaucoup
     // moins de résidences que réellement présentes dans le fichier.
-    setFilters({commune:'',secteur:'',famille:'',dpe:''});
+    setFilters({commune:'',secteur:'',famille:'',dpe:'',qpv:''});
     setBaseRefreshTick((t)=>t+1); // rafraîchit la version base (elle a pu changer depuis un autre onglet/écran)
   }
   function onRestoreSave(rec){
     setData(rec.data);
     setSimOperationsRaw((rec.simOperations||[]).map((o)=>Object.assign({},o)));
-    setBudgetLibreRaw(rec.budgetLibre || {});
+    setBudgetLignesRaw(migrateBudgetLignes(rec));
     setOffreNouvelleLgtRaw(rec.offreNouvelleLgt || {});
+    setVentesSimuleesRaw(rec.ventesSimulees || []);
     setIncludeIdentifiees(rec.includeIdentifiees!==undefined? rec.includeIdentifiees : true);
     setDirty(false);
     setActiveTab('ensemble');
     setSelectedResidence(null);
     setCurrentSaveId(rec.id);
-    setFilters({commune:'',secteur:'',famille:'',dpe:''});
+    setFilters({commune:'',secteur:'',famille:'',dpe:'',qpv:''});
     setBaseRefreshTick((t)=>t+1);
   }
   function goToImportScreen(){ setData(null); setCurrentSaveId(null); }
   function setOperations(next){ setSimOperationsRaw(next); setDirty(true); }
-  function setBudgetLibre(next){ setBudgetLibreRaw(next); setDirty(true); }
+  function setBudgetLignes(next){ setBudgetLignesRaw(next); setDirty(true); }
   function setOffreNouvelleLgt(next){ setOffreNouvelleLgtRaw(next); setDirty(true); }
-  function resetSimulation(){ setSimOperationsRaw(data.operations.map((o)=>Object.assign({},o))); setBudgetLibreRaw({}); setOffreNouvelleLgtRaw({}); setIncludeIdentifiees(true); setDirty(false); }
+  function setVentesSimulees(next){ setVentesSimuleesRaw(next); setDirty(true); }
+  function resetSimulation(){ setSimOperationsRaw(data.operations.map((o)=>Object.assign({},o))); setBudgetLignesRaw([]); setOffreNouvelleLgtRaw({}); setVentesSimuleesRaw([]); setIncludeIdentifiees(true); setDirty(false); }
 
   async function doSaveCurrent(name, asNew){
     const existing = (!asNew && currentSaveId) ? await idbGet(currentSaveId) : null;
@@ -3068,7 +3486,7 @@ function App(){
       nomFichierSource: data.fileName,
       gabaritComplet: data.gabaritComplet,
       nbCols: data.nbCols,
-      data, simOperations, budgetLibre, offreNouvelleLgt, includeIdentifiees,
+      data, simOperations, budgetLignes, offreNouvelleLgt, ventesSimulees, includeIdentifiees,
       estBase: existing? existing.estBase : false,
       dateCreation: existing? existing.dateCreation : undefined,
     });
@@ -3094,7 +3512,10 @@ function App(){
   }
 
   const filteredCodes = new Set(filteredResidences.map((r)=>r.code));
-  const filteredOperations = simOperations.filter((o)=>filteredCodes.has(o.resCode));
+  // resCode===null : opération/vente venant d'être ajoutée, pas encore assignée à une résidence
+  // (§9.3/§12 — champs vides à la création) — toujours visible, quels que soient les filtres
+  // transverses actifs, sinon la ligne disparaît de la vue dès sa création.
+  const filteredOperations = simOperations.filter((o)=>o.resCode===null || filteredCodes.has(o.resCode));
   const hasCarto = data.residences.some((r)=>r.adresse && String(r.adresse).trim());
   const hasFinance = data.residences.some((r)=>r.crd!==null || r.autofinancement!==null || r.vnc!==null);
   const hasUsableBase = !!(baseImport && baseImport.data && baseImport.id!==currentSaveId);
@@ -3127,12 +3548,6 @@ function App(){
           </div>
         </div>
 
-        {dirty && (
-          <div className="sim-banner">
-            <span>🧪 Mode simulation actif — les valeurs affichées ne correspondent plus aux données brutes du fichier importé.</span>
-            <button className="ce-btn-sm" style={{background:'#fff',color:'var(--ce-corail)',border:'none',borderRadius:5,fontWeight:700,cursor:'pointer',padding:'4px 12px'}} onClick={resetSimulation}>Réinitialiser</button>
-          </div>
-        )}
 
         <FilterBar residences={data.residences} filters={filters} setFilters={setFilters} />
         <Nav active={activeTab} setActive={setActiveTab} hasFinance={hasFinance} hasCarto={hasCarto} hasCompare={hasCompare} />
@@ -3146,13 +3561,13 @@ function App(){
             residences={filteredResidences}
             operations={filteredOperations}
             setOperations={(next)=>{
-              const otherCodesOps = simOperations.filter((o)=>!filteredCodes.has(o.resCode));
+              const otherCodesOps = simOperations.filter((o)=>o.resCode!==null && !filteredCodes.has(o.resCode));
               setOperations(otherCodesOps.concat(next));
             }}
             includeIdentifiees={includeIdentifiees}
             setIncludeIdentifiees={(v)=>{setIncludeIdentifiees(v); setDirty(true);}}
-            budgetLibre={budgetLibre}
-            setBudgetLibre={setBudgetLibre}
+            budgetLignes={budgetLignes}
+            setBudgetLignes={setBudgetLignes}
             gainsGrid={data.gainsGrid}
             isModified={dirty}
             onReset={resetSimulation}
@@ -3167,21 +3582,26 @@ function App(){
             operations={filteredOperations}
             offreNouvelleLgt={offreNouvelleLgt}
             setOffreNouvelleLgt={setOffreNouvelleLgt}
+            ventesSimulees={ventesSimulees.filter((v)=>v.resCode===null || filteredCodes.has(v.resCode))}
+            setVentesSimulees={(next)=>{
+              const otherCodesVentes = ventesSimulees.filter((v)=>v.resCode!==null && !filteredCodes.has(v.resCode));
+              setVentesSimulees(otherCodesVentes.concat(next));
+            }}
           />
         )}
-        {activeTab==='pivot' && <ViewPivot residences={filteredResidences} operations={filteredOperations} />}
+        {activeTab==='pivot' && <ViewPivot residences={filteredResidences} operations={filteredOperations} onSelectResidence={setSelectedResidence} />}
         {activeTab==='carto' && <ViewCarto residences={filteredResidences} allResidences={data.residences} onSelectResidence={setSelectedResidence} />}
         {activeTab==='compare' && (
           <ViewComparatif currentSnapshot={{
             nom: 'Import actuel — '+data.fileName,
-            data, simOperations, budgetLibre, includeIdentifiees,
+            data, simOperations, budgetLignes, includeIdentifiees,
             nomFichierSource: data.fileName, gabaritComplet: data.gabaritComplet,
           }} />
         )}
       </div>
 
       <div className="ce-footer">cellance — Document confidentiel — Traitement 100% local ; seule exception : l'onglet Cartographie transmet les adresses des résidences à l'API publique api-adresse.data.gouv.fr pour les géolocaliser</div>
-      <ResidenceDrawer residence={selectedResidence} operations={simOperations} residences={filteredResidences} onClose={()=>setSelectedResidence(null)} />
+      <ResidenceDrawer residence={selectedResidence} operations={simOperations} residences={filteredResidences} onClose={()=>setSelectedResidence(null)} gainsGrid={data.gainsGrid} hasGainsGrid={data.hasGainsGrid} includeIdentifiees={includeIdentifiees} />
     </div>
   );
 }
