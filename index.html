@@ -2076,7 +2076,14 @@ function ViewInvestissements({residences, operations, setOperations, includeIden
     {key:'resCode', label:'Résidence', render:(o)=>{
       const inList = residences.some((r)=>r.code===o.resCode);
       return (
-        <select className="ce-select" value={o.resCode ?? ''} onChange={(e)=>updateOp(o.id,{resCode:e.target.value})}>
+        <select className="ce-select" value={o.resCode ?? ''} onChange={(e)=>{
+          // <option value=...> est toujours une chaîne côté DOM, même quand r.code est numérique
+          // (cas courant) : sans cette résolution, resCode passait de number à string, ce qui cassait
+          // silencieusement le filtrage par filteredCodes.has(resCode) (comparaison stricte) et faisait
+          // disparaître la ligne dès qu'une résidence était choisie.
+          const match = residences.find((r)=>String(r.code)===e.target.value);
+          updateOp(o.id,{resCode: match? match.code : e.target.value});
+        }}>
           <option value="" disabled>— À sélectionner —</option>
           {!inList && o.resCode && <option value={o.resCode}>{o.resNom || o.resCode} (hors filtre)</option>}
           {residences.map((r)=><option key={r.code} value={r.code}>{r.nom||r.code}</option>)}
@@ -2431,7 +2438,12 @@ function ViewOffreVente({residences, operations, offreNouvelleLgt, setOffreNouve
   }
   function updateVente(id, patch){ setVentesSimulees(ventesSimulees.map((v)=> v.id===id? Object.assign({},v,patch) : v)); }
   function removeVente(id){ setVentesSimulees(ventesSimulees.filter((v)=>v.id!==id)); }
-  function selectVenteResidence(id, resCode, currentLogementsRestants){
+  function selectVenteResidence(id, rawResCode, currentLogementsRestants){
+    // rawResCode vient de <select> (toujours une chaîne côté DOM) : on le résout vers le code natif
+    // de la résidence (souvent numérique) pour rester cohérent avec filteredCodes.has(resCode) côté
+    // App, sans quoi la ligne disparaissait de la vue dès la sélection d'une résidence.
+    const match = residences.find((r)=>String(r.code)===rawResCode);
+    const resCode = match? match.code : rawResCode;
     const patch = { resCode };
     // Pré-remplissage au moment de la sélection uniquement, jamais en repli permanent : une fois
     // modifié manuellement par l'utilisateur, la valeur ne doit plus être écrasée par ce pré-remplissage.
