@@ -2095,7 +2095,16 @@ function ViewInvestissements({residences, operations, setOperations, includeIden
       const val = o.nature ?? o.type ?? '';
       return (
         <div>
-          <select className="ce-select" value={val} onChange={(e)=>updateOp(o.id,{nature:e.target.value})}>
+          <select className="ce-select" value={val} onChange={(e)=>{
+            const nature = e.target.value;
+            // Auto-renseigne le Type de travaux brut (RC/Réha./Changement de vecteur/Démolition) à
+            // partir de la Nature choisie, avec les mêmes règles de détection que familyOfType() —
+            // indispensable pour les opérations ajoutées manuellement (type toujours vide sinon), et
+            // cohérent pour les opérations importées si la Nature est modifiée après coup : sans ça,
+            // le filtre "Type de travaux" et le graphique empilé par famille de travaux catégorisaient
+            // mal (ou pas du tout) ces opérations.
+            updateOp(o.id,{nature, type: typeCategorie(nature)});
+          }}>
             <option value="" disabled>— À sélectionner —</option>
             {typeOptions.map((t)=><option key={t} value={t}>{t}</option>)}
           </select>
