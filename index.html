@@ -50,6 +50,9 @@ html,body{margin:0;padding:0;background:var(--ce-vert-tres-clair);font-family:va
 .ce-tab:hover{color:var(--ce-vert-principal);}
 .ce-tab.active{color:var(--ce-vert-principal);border-bottom-color:var(--ce-vert-principal);}
 .ce-tab.disabled{color:#b7c9c4;cursor:not-allowed;}
+.ce-nav-dropdown-item{padding:8px 16px;border-radius:6px;font-size:.82rem;font-weight:600;cursor:pointer;color:var(--ce-vert-fonce);white-space:nowrap;}
+.ce-nav-dropdown-item:hover{background:#f5f8f7;}
+.ce-nav-dropdown-item.active{color:var(--ce-vert-principal);background:var(--ce-vert-tres-clair);}
 
 .ce-input, .ce-select{border:1.5px solid #dfeae6;border-radius:6px;padding:6px 10px;font-family:var(--ce-font);font-size:.8rem;background:#fff;color:var(--ce-vert-tres-fonce);}
 .ce-input:focus, .ce-select:focus{outline:none;border-color:var(--ce-vert-principal);}
@@ -58,6 +61,10 @@ table.ce-table{width:100%;border-collapse:collapse;font-size:.78rem;}
 table.ce-table thead th{position:sticky;top:0;background:var(--ce-vert-tres-clair);color:var(--ce-vert-tres-fonce);text-align:left;padding:8px 10px;font-weight:700;font-size:.7rem;text-transform:uppercase;letter-spacing:.03em;border-bottom:2px solid var(--ce-vert-pastel);cursor:pointer;user-select:none;}
 table.ce-table tbody td{padding:7px 10px;border-bottom:1px solid #f0f5f3;}
 table.ce-table tbody tr:hover{background:var(--ce-vert-tres-clair);cursor:pointer;}
+/* Variante resserrée (colonnes rapprochées) pour les tableaux à beaucoup de colonnes, ex. Opérations
+   dans Investissements & Entretien du parc — n'affecte que les tables qui l'utilisent explicitement. */
+table.ce-table-dense thead th{padding:6px 6px;}
+table.ce-table-dense tbody td{padding:4px 6px;}
 
 .dpe-badge{display:inline-flex;align-items:center;justify-content:center;min-width:24px;height:20px;padding:0 5px;border-radius:4px;font-weight:800;font-size:.72rem;color:#1C3A35;white-space:nowrap;}
 
@@ -524,7 +531,7 @@ function resolveGain(op, gainsGrid, metric){
 function hasKnownDpeGain(op, gainsGrid){
   return resolveGain(op, gainsGrid, 'energie')!==null;
 }
-function computeTrajectory(residences, operations, gainsGrid, years, metric, includeIdentifiees){
+function computeTrajectory(residences, operations, gainsGrid, years, metric, includeIdentifiees, onYearEnd){
   const distKey = metric==='energie'? 'distEnergie':'distGES';
   const state={}, alive={};
   residences.forEach((r)=>{ state[r.code]=Object.assign({A:0,B:0,C:0,D:0,E:0,F:0,G:0,NR:0}, r[distKey]||{}); alive[r.code]=true; });
@@ -559,8 +566,33 @@ function computeTrajectory(residences, operations, gainsGrid, years, metric, inc
     const agg={A:0,B:0,C:0,D:0,E:0,F:0,G:0,NR:0};
     residences.forEach((r)=>{ if (alive[r.code]){ const d=state[r.code]; Object.keys(agg).forEach((cl)=>agg[cl]+=(d[cl]||0)); } });
     timeline[y]=agg;
+    // Callback optionnel exposant l'état par résidence (pas seulement l'agrégat portefeuille) à la
+    // fin de chaque année — utilisé par computeTrajectoryByResidence (cf. Tableau "Impact des actions
+    // stratégiques") pour lire la distribution DPE d'une résidence donnée à une échéance choisie, sans
+    // dupliquer toute la boucle de cascade ci-dessus.
+    if (onYearEnd) onYearEnd(y, state, alive);
   });
   return timeline;
+}
+
+// Variante par résidence de computeTrajectory ci-dessus : ne renvoie pas l'agrégat portefeuille mais
+// l'état individuel (distribution DPE + vivante/démolie) de chaque résidence à une année cible donnée.
+// `echeance` borne la trajectoire (les opérations au-delà ne sont jamais appliquées) sans qu'il soit
+// nécessaire de pré-filtrer `operations` : on se contente de ne pas dépasser `echeance` dans `years`.
+function computeTrajectoryByResidence(residences, operations, gainsGrid, echeance, metric, includeIdentifiees){
+  const years = computeYearsRange(operations).filter((y)=>y<=echeance);
+  let finalState=null, finalAlive=null;
+  computeTrajectory(residences, operations, gainsGrid, years, metric, includeIdentifiees, (y, state, alive)=>{
+    finalState = state; finalAlive = alive;
+  });
+  if (!finalState){
+    // echeance antérieure à la première année de la trajectoire : aucune année parcourue, l'état
+    // "après" reste identique à l'état brut importé.
+    const distKey = metric==='energie'? 'distEnergie':'distGES';
+    finalState={}; finalAlive={};
+    residences.forEach((r)=>{ finalState[r.code]=Object.assign({A:0,B:0,C:0,D:0,E:0,F:0,G:0,NR:0}, r[distKey]||{}); finalAlive[r.code]=true; });
+  }
+  return { state: finalState, alive: finalAlive };
 }
 
 function familyOfType(type){
@@ -629,6 +661,101 @@ function computeTechniqueProjection(residence, operations, includeIdentifiees){
   const values = TECH_SUBCRITERES.map((l)=>({label:l, value:state[l]}));
   const technique = values.reduce((s,v)=>s+v.value,0) / values.length;
   return { demolished:false, values, technique, initialTechnique };
+}
+
+/* ---------------- DPE Global (résidence) — règle de classement Cellance, pas une colonne du
+   gabarit : cf. Segmentation en 9 familles (axe DPE Global) et Impact des actions stratégiques
+   (grilles avant/après). Définie une seule fois ici et réutilisée telle quelle par les deux
+   fonctionnalités pour ne jamais diverger. Validé avec Jules le 2026-07-20 : pas de correspondance
+   logement-par-logement entre classe Énergie et classe GES dans les fichiers, donc on classe chaque
+   distribution indépendamment puis on retient la moins bonne des deux. */
+const DPE_PERF_ORDER = ['Performant -', 'Performant ±', 'Performant +'];
+function dpePerfBandOfDist(dist){
+  if (!dist) return null;
+  const total = ['A','B','C','D','E','F','G'].reduce((s,c)=>s+(dist[c]||0), 0);
+  if (total<=0) return null;
+  const efg = (dist.E||0)+(dist.F||0)+(dist.G||0);
+  const abc = (dist.A||0)+(dist.B||0)+(dist.C||0);
+  if (efg>=1) return 'Performant -';
+  if (abc/total<0.80) return 'Performant ±';
+  return 'Performant +';
+}
+function dpeGlobalBand(residence){
+  const bandEnergie = dpePerfBandOfDist(residence.distEnergie);
+  const bandGES = dpePerfBandOfDist(residence.distGES);
+  if (!bandEnergie && !bandGES) return null;
+  if (!bandEnergie) return bandGES;
+  if (!bandGES) return bandEnergie;
+  return DPE_PERF_ORDER[Math.min(DPE_PERF_ORDER.indexOf(bandEnergie), DPE_PERF_ORDER.indexOf(bandGES))];
+}
+
+/* ---------------- Axe État technique du tableau "Impact des actions stratégiques" — seuils
+   absolus (confirmés par Jules), à ne pas confondre avec les bandes de la Segmentation en 9 familles
+   qui restent, elles, relatives au maximum observé dans le fichier importé. */
+function technicalBand(note){
+  if (note===null || note===undefined || isNaN(note)) return null;
+  if (note>70) return 'Bon état';
+  if (note>=50) return 'État moyen';
+  return 'État à améliorer';
+}
+
+/* ---------------- Généralisation Base / Actuel / Cible ----------------
+   Base : version sauvegardée de référence (baseImport), utilisée telle quelle, jamais reprojetée.
+   Actuel : import courant, opérations dont l'année <= anneeCoupureActuel() seulement (ce qui est déjà
+   réalisé/committed à la date du jour).
+   Cible : import courant, toutes les opérations de la trajectoire (jusqu'à la dernière année couverte).
+   Cible ne doit JAMAIS être recalculée indépendamment d'Actuel : les deux passent par la même fonction
+   filterOpsUntil(), seul le cutoff change, ce qui garantit qu'elles sont rigoureusement identiques
+   jusqu'à anneeCoupureActuel() incluse (même cascade, mêmes filtres, aucun risque de divergence par
+   arrondi ou par filtre légèrement différent entre les deux). */
+function anneeCoupureActuel(dateImport){
+  const d = dateImport || new Date();
+  const annee = d.getFullYear();
+  const mois = d.getMonth(); // 0-indexé : 10 = novembre, 11 = décembre
+  return mois>=10 ? annee : annee-1;
+}
+function filterOpsUntil(operations, year){
+  return operations.filter((o)=> o.annee!==null && o.annee!==undefined && o.annee<=year);
+}
+
+// Appariement d'opérations Actuel <-> Base par Code de résidence + Nature des travaux (libellé exact,
+// jamais "Type de travaux" — cf. resolveGain/computeTechniqueProjection ci-dessus, même convention),
+// tri chronologique et appariement 1ère avec 1ère / 2ème avec 2ème en cas d'opérations multiples de
+// même nature sur une même résidence. Fonction unique, réutilisée par la table des écarts
+// d'"Investissements & Entretien du parc" et par l'onglet "Actions stratégiques" de la fiche résidence.
+function matchOperations(actuelOps, baseOps){
+  function groupBy(ops){
+    const g = {};
+    (ops||[]).forEach((o)=>{
+      const nature = String(o.nature || o.type || '').trim();
+      const key = o.resCode+'|'+nature;
+      if (!g[key]) g[key]=[];
+      g[key].push(o);
+    });
+    Object.values(g).forEach((arr)=>arr.sort((a,b)=>(a.annee??9999)-(b.annee??9999)));
+    return g;
+  }
+  const gActuel = groupBy(actuelOps), gBase = groupBy(baseOps);
+  const matched=[], nouvelles=[], disparues=[];
+  const keys = new Set(Object.keys(gActuel).concat(Object.keys(gBase)));
+  keys.forEach((key)=>{
+    const a = gActuel[key]||[], b = gBase[key]||[];
+    const n = Math.max(a.length, b.length);
+    for (let i=0;i<n;i++){
+      const actuelOp = a[i], baseOp = b[i];
+      if (actuelOp && baseOp){
+        const deltaMontant = (actuelOp.montant||0) - (baseOp.montant||0);
+        const deltaPct = baseOp.montant ? (deltaMontant/baseOp.montant*100) : null;
+        const deltaAnnees = (actuelOp.annee!=null && baseOp.annee!=null) ? (actuelOp.annee-baseOp.annee) : null;
+        matched.push({ actuelOp, baseOp, deltaMontant, deltaPct, deltaAnnees });
+      } else if (actuelOp && !baseOp){
+        nouvelles.push(actuelOp);
+      } else if (baseOp && !actuelOp){
+        disparues.push(baseOp);
+      }
+    }
+  });
+  return { matched, nouvelles, disparues };
 }
 </script>
 
@@ -854,7 +981,7 @@ function CritBar({label, value, max}){
 }
 
 /* ---------------- Chart.js wrapper ---------------- */
-function ChartCanvas({type, data, options, height}){
+function ChartCanvas({type, data, options, height, plugins}){
   const canvasRef = useRef(null);
   const chartRef = useRef(null);
   useEffect(()=>{
@@ -863,11 +990,43 @@ function ChartCanvas({type, data, options, height}){
     chartRef.current = new Chart(canvasRef.current.getContext('2d'), {type, data, options: Object.assign({
       responsive:true, maintainAspectRatio:false,
       plugins:{legend:{labels:{font:{family:'Open Sans',size:11}, color:'#1C3A35'}}},
-    }, options||{})});
+    }, options||{}), plugins: plugins||[]});
     return ()=>{ if (chartRef.current) chartRef.current.destroy(); };
-  }, [JSON.stringify(data), JSON.stringify(options), type]);
+  }, [JSON.stringify(data), JSON.stringify(options), type, plugins]);
   return <div style={{height: height||280}}><canvas ref={canvasRef}></canvas></div>;
 }
+
+// Plugin Chart.js dessinant un % d'écart sous chaque barre d'une catégorie, aligné pixel pour pixel
+// sur la position réelle de la barre du dataset ciblé (contrairement à une rangée HTML posée sous le
+// graphique, qui ne peut pas connaître la largeur de l'axe Y ni le padding interne de Chart.js et se
+// désaligne dès que ces derniers changent). N'agit que si `options.plugins.ceEcartLabels` est fourni
+// (sinon no-op) — passé via la prop `plugins` de ChartCanvas, jamais enregistré globalement.
+const CE_ECART_LABELS_PLUGIN = {
+  id: 'ceEcartLabels',
+  afterDatasetsDraw(chart){
+    const cfg = chart.options.plugins && chart.options.plugins.ceEcartLabels;
+    if (!cfg || !cfg.values) return;
+    const meta = chart.getDatasetMeta(cfg.datasetIndex||0);
+    if (!meta || !meta.data || !meta.data.length) return;
+    const ctx = chart.ctx;
+    ctx.save();
+    ctx.font = '700 11px "Open Sans", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    meta.data.forEach((bar, i)=>{
+      const val = cfg.values[i];
+      if (val===null || val===undefined || isNaN(val)) return;
+      const { x } = bar.getProps(['x'], true);
+      ctx.fillStyle = val>=0 ? (cfg.colorPos||'#FF8364') : (cfg.colorNeg||'#009261');
+      ctx.fillText((val>=0?'+':'')+val.toFixed(0)+'%', x, chart.chartArea.bottom + (cfg.offsetY!=null? cfg.offsetY : 20));
+    });
+    ctx.restore();
+  }
+};
+// Référence stable (pas un littéral recréé à chaque rendu) : passée telle quelle à la prop `plugins`
+// de ChartCanvas, dont l'effet de (re)création du graphique en dépend — un nouveau tableau à chaque
+// rendu forcerait Chart.js à se détruire/recréer inutilement à chaque re-rendu du composant parent.
+const CE_ECART_LABELS_PLUGINS = [CE_ECART_LABELS_PLUGIN];
 
 /* ---------------- Carte Leaflet (cartographie) ---------------- */
 function LeafletMap({markers, height, onSelectResidence}){
@@ -1283,28 +1442,122 @@ function applyFilters(residences, filters){
   });
 }
 
-/* ---------------- Navigation ---------------- */
-function Nav({active, setActive, hasFinance, hasCarto, hasCompare}){
-  const tabs = [
-    {id:'ensemble', label:"Vue d'ensemble"},
-    {id:'cotation', label:'Base de cotation'},
-    {id:'invest', label:'Investissements & simulation'},
-    {id:'dpe', label:'Décarbonation & DPE'},
-    {id:'finance', label:'Données financières', disabled: !hasFinance},
-    {id:'offre_vente', label:'Offre nouvelle & Vente'},
-    {id:'pivot', label:'Analyse libre (pivot)'},
-    {id:'carto', label:'Cartographie', disabled: !hasCarto},
-  ];
-  if (hasCompare) tabs.push({id:'compare', label:'Comparatif'});
+/* ---------------- Sélecteur générique Base / Actuel / Cible ----------------
+   3 cases indépendantes (1, 2 ou 3 cochées simultanément), utilisées aux 4 emplacements de
+   comparaison généralisée (§2.3 de la spec) : nuage Attractivité x État technique, trajectoire
+   d'investissement, trajectoire de décarbonation, tableau Impact des actions stratégiques.
+   Toujours au moins une case cochée (on ignore le clic qui viderait tout plutôt que de reverrouiller
+   après coup, pour éviter tout flash d'état vide). Base est désactivée si aucune version base n'est
+   chargée ; Actuel et Cible restent toujours actives (Cible ne dépend que du fichier ouvert, pas
+   d'une sauvegarde Base — choix assumé pour préserver le tableau Impact qui fonctionne déjà sans Base,
+   cf. plan approuvé). */
+const COMPARE_COLORS = { base:'#9fb3ae', actuel:'#009261', cible:'#FF8364' };
+const COMPARE_LABELS = { base:'Base', actuel:'Actuel', cible:'Cible' };
+function defaultCompareState(){ return {base:false, actuel:true, cible:false}; }
+function clampCompareState(state, hasBase){
+  const s = Object.assign({}, state);
+  if (!hasBase) s.base = false;
+  if (!s.base && !s.actuel && !s.cible) s.actuel = true;
+  return s;
+}
+function CompareCheckboxes({checked, onChange, hasBase}){
+  function toggle(key){
+    if (key==='base' && !hasBase) return;
+    const next = Object.assign({}, checked, {[key]: !checked[key]});
+    if (!next.base && !next.actuel && !next.cible) return; // reverrouille : ignore le clic qui viderait tout
+    onChange(next);
+  }
   return (
-    <div style={{background:'#fff',borderBottom:'2px solid #eef4f2',display:'flex',padding:'0 24px',overflowX:'auto'}}>
-      {tabs.map((t)=>(
-        <div key={t.id}
-          className={"ce-tab"+(active===t.id?" active":"")+(t.disabled?" disabled":"")}
-          title={t.disabled? (t.id==='carto' ? "Nécessite une colonne adresse dans le fichier importé" : "Non disponible dans ce fichier"):""}
-          onClick={()=>{ if(!t.disabled) setActive(t.id); }}
-        >{t.label}</div>
-      ))}
+    <div style={{display:'flex',gap:12,alignItems:'center',flexWrap:'wrap'}}>
+      {['base','actuel','cible'].map((key)=>{
+        const disabled = key==='base' && !hasBase;
+        return (
+          <label key={key} title={disabled? "Définissez une version base pour activer cette comparaison" : ""}
+            style={{display:'flex',alignItems:'center',gap:5,fontSize:'.76rem',fontWeight:700,color: disabled? '#c3d0cc' : 'var(--ce-vert-fonce)',cursor: disabled?'not-allowed':'pointer',opacity: disabled?0.6:1}}>
+            <input type="checkbox" checked={!!checked[key]} disabled={disabled} onChange={()=>toggle(key)} />
+            <span style={{display:'inline-block',width:9,height:9,borderRadius:'50%',background:COMPARE_COLORS[key]}}></span>
+            {COMPARE_LABELS[key]}
+          </label>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ---------------- Navigation ----------------
+   Arborescence à 2 sections (§1 de la spec) : "Synthèse du PSP" et "Orientations stratégiques"
+   regroupent des sous-onglets ; les autres entrées restent au niveau 1, inchangées. Seuls le
+   libellé/regroupement changent — les composants de vue gardent leurs noms et props existants. */
+const NAV_ITEMS = [
+  {id:'ensemble', label:"Vue d'ensemble"},
+  {section:'synthese', label:'Synthèse du PSP', tabs:[
+    {id:'cotation', label:'Impacts stratégiques'},
+    {id:'dpe', label:'Décarbonation DPE'},
+  ]},
+  {section:'orientations', label:'Orientations stratégiques', tabs:[
+    {id:'invest', label:'Investissements & Entretien du parc'},
+    {id:'offre', label:'Offre nouvelle'},
+    {id:'vente', label:'Vente'},
+  ]},
+  {id:'finance', label:'Données financières'},
+  {id:'pivot', label:'Analyse libre (pivot)'},
+  {id:'carto', label:'Cartographie'},
+];
+function Nav({active, setActive, hasFinance, hasCarto, hasCompare}){
+  const [openSection, setOpenSection] = useState(null);
+  const items = NAV_ITEMS.map((it)=>{
+    if (it.id==='finance') return Object.assign({}, it, {disabled: !hasFinance});
+    if (it.id==='carto') return Object.assign({}, it, {disabled: !hasCarto});
+    return it;
+  });
+  if (hasCompare) items.push({id:'compare', label:'Comparatif'});
+
+  // Une section reste surlignée tant que l'onglet actif lui appartient, indépendamment du menu
+  // déroulant (qui, lui, ne reste ouvert que tant que l'utilisateur ne l'a pas refermé/n'a pas choisi
+  // un sous-onglet/cliqué ailleurs).
+  const activeSection = items.find((it)=> it.tabs && it.tabs.some((t)=>t.id===active));
+
+  return (
+    // overflowX:'auto' ici clipperait le menu déroulant des sections (position:absolute, positionné
+    // sous son déclencheur) : per la spec CSS, un axe overflow non-'visible' force l'autre axe à
+    // 'auto' aussi, ce qui transforme cette barre en zone de défilement qui coupe tout ce qui dépasse
+    // sa hauteur — dont le menu. flexWrap remplace le scroll horizontal si la barre est trop étroite.
+    <div style={{background:'#fff',borderBottom:'2px solid #eef4f2',display:'flex',flexWrap:'wrap',padding:'0 24px'}}>
+      {items.map((it)=>{
+        if (it.tabs){
+          const isOpen = openSection===it.section;
+          const isActive = (activeSection && activeSection.section===it.section) || isOpen;
+          return (
+            <div key={it.section} style={{position:'relative'}}>
+              <div
+                className={"ce-tab"+(isActive?" active":"")}
+                onClick={()=> setOpenSection((cur)=> cur===it.section? null : it.section)}
+              >{it.label} {isOpen?'▴':'▾'}</div>
+              {isOpen && (
+                <React.Fragment>
+                  {/* Ferme le menu au clic en dehors — même principe que drawer-overlay pour la fiche résidence. */}
+                  <div style={{position:'fixed',inset:0,zIndex:9}} onClick={()=>setOpenSection(null)}></div>
+                  <div style={{position:'absolute',top:'100%',left:0,marginTop:2,background:'#fff',border:'1px solid #eef4f2',borderRadius:8,boxShadow:'0 8px 24px rgba(0,0,0,.12)',zIndex:10,minWidth:240,padding:6}}>
+                    {it.tabs.map((t)=>(
+                      <div key={t.id}
+                        className={"ce-nav-dropdown-item"+(active===t.id?" active":"")}
+                        onClick={()=>{ setActive(t.id); setOpenSection(null); }}
+                      >{t.label}</div>
+                    ))}
+                  </div>
+                </React.Fragment>
+              )}
+            </div>
+          );
+        }
+        return (
+          <div key={it.id}
+            className={"ce-tab"+(active===it.id?" active":"")+(it.disabled?" disabled":"")}
+            title={it.disabled? (it.id==='carto' ? "Nécessite une colonne adresse dans le fichier importé" : "Non disponible dans ce fichier"):""}
+            onClick={()=>{ if(!it.disabled){ setActive(it.id); setOpenSection(null); } }}
+          >{it.label}</div>
+        );
+      })}
     </div>
   );
 }
@@ -1549,7 +1802,7 @@ function ViewEnsemble({residences, operations}){
 }
 
 /* ---------------- Base de cotation ---------------- */
-function SortableTable({columns, rows, onRowClick, pageSize}){
+function SortableTable({columns, rows, onRowClick, pageSize, dense}){
   const [sortCol, setSortCol] = useState(null);
   const [sortDir, setSortDir] = useState(1);
   const [page, setPage] = useState(0);
@@ -1576,7 +1829,7 @@ function SortableTable({columns, rows, onRowClick, pageSize}){
   return (
     <div>
       <div style={{overflowX:'auto',maxHeight:480,overflowY:'auto',border:'1px solid #eef4f2',borderRadius:8}}>
-        <table className="ce-table">
+        <table className={"ce-table"+(dense?" ce-table-dense":"")}>
           <thead><tr>{columns.map((c)=>(
             <th key={c.key} onClick={()=>toggleSort(c.key)}>{c.label}{sortCol===c.key? (sortDir>0?' ▲':' ▼'):''}</th>
           ))}</tr></thead>
@@ -1605,6 +1858,7 @@ function SortableTable({columns, rows, onRowClick, pageSize}){
 function critValue(r, key){
   if (key==='attractivite') return r.attractivite;
   if (key==='technique') return r.technique;
+  if (key==='dpeGlobal') return null; // classé directement via dpeGlobalBand, pas de valeur numérique brute
   return (r.notes && r.notes[key]!==undefined) ? r.notes[key] : null;
 }
 const SEG_BANDS = ['Très bon','Bon','Mauvais'];
@@ -1614,8 +1868,168 @@ function bandOf(pct){
   if (pct>=50) return 'Bon';
   return 'Mauvais';
 }
+// DPE Global ne peut pas suivre bandOf(pct) (seuils relatifs au max observé dans le fichier) : ses
+// seuils sont absolus (présence de logements E/F/G, part de logements A/B/C) et propres au DPE — cf.
+// dpeGlobalBand(). On généralise donc ici le système de bandes : chaque critère fournit ses propres
+// libellés de bandes (meilleur -> pire, même convention que SEG_BANDS) et sa propre fonction de
+// classement, sans changer le comportement d'Attractivité/État technique/notes (toujours pct-du-max).
+const DPE_GLOBAL_BANDS = DPE_PERF_ORDER.slice().reverse(); // ['Performant +','Performant ±','Performant -']
+function bandsForCriterion(key){
+  return key==='dpeGlobal' ? DPE_GLOBAL_BANDS : SEG_BANDS;
+}
+function classifierForCriterion(residences, key){
+  if (key==='dpeGlobal') return (r)=>dpeGlobalBand(r);
+  const vals = residences.map((r)=>critValue(r,key)).filter((v)=>v!==null&&v!==undefined&&!isNaN(v)&&v>0);
+  const max = vals.length? Math.max(...vals) : null;
+  return (r)=>{
+    const v = critValue(r,key);
+    if (v===null||v===undefined||isNaN(v)||!max||max<=0) return null;
+    return bandOf(v/max*100);
+  };
+}
+// Compteurs Réhab / RC / Démolition / Vente affichés en permanence dans chaque cellule, quel que
+// soit le croisement de critères choisi — mêmes familles que la trajectoire d'investissement
+// (§7.1), toujours en nombre de logements même quand "Taille des familles" est sur "résidences".
+// Logements d'une famille de travaux dans un jeu d'opérations, avec repli sur nbLgt de la résidence
+// pour les démolitions ne renseignant pas "Logements concernés" (même règle dans les deux usages) —
+// extraite ici pour être réutilisée à la fois par cellCounters (une seule famille de résidences) et
+// countByFamily (comparaison Base/Actuel sur l'ensemble du parc, cf. bandeaux §4.2/§5.2).
+function sumLogementsForFamily(ops, fam, resByCode){
+  return ops.filter((o)=>familyOfType(o.type)===fam).reduce((s,o)=>{
+    let n = o.logements;
+    if ((n===null || n===undefined) && fam==='Démolition'){ const r=resByCode[o.resCode]; n = r? r.nbLgt : 0; }
+    return s+(n||0);
+  }, 0);
+}
+function cellCounters(members, operations, includeIdentifiees){
+  const resByCode = {}; members.forEach((r)=>{ resByCode[r.code]=r; });
+  const resCodes = new Set(members.map((r)=>r.code));
+  const ops = operations.filter((o)=> resCodes.has(o.resCode) && (includeIdentifiees || o.statut!=='identifie'));
+  return {
+    rehab: sumLogementsForFamily(ops, 'Réhabilitation', resByCode),
+    rc: sumLogementsForFamily(ops, 'Remplacement de composants', resByCode),
+    demolition: sumLogementsForFamily(ops, 'Démolition', resByCode),
+    vente: members.reduce((s,r)=>s+(r.nbLgtMiseVente||0),0),
+  };
+}
+// Compteurs "prévu (Base) / réalisé (Actuel) / taux de réalisation" par famille de travaux — bandeaux
+// §4.2 (Impact des actions stratégiques) et §5.2 (Investissements & Entretien du parc), qui réutilisent
+// tous deux cette même fonction plutôt que de recompter indépendamment (cf. plan approuvé).
+function countByFamily(baseOps, actuelOps, residences, families){
+  const resByCode = {}; (residences||[]).forEach((r)=>{ resByCode[r.code]=r; });
+  const fams = families || ['Réhabilitation','Remplacement de composants','Démolition'];
+  const out = {};
+  fams.forEach((fam)=>{
+    const prevu = sumLogementsForFamily(baseOps||[], fam, resByCode);
+    const realise = sumLogementsForFamily(actuelOps||[], fam, resByCode);
+    out[fam] = { prevu, realise, tauxPct: prevu>0 ? Math.round(realise/prevu*100) : null };
+  });
+  return out;
+}
+// Vente et Offre nouvelle ne viennent pas des opérations classiques de la Base de cotation (cf. §4.2
+// de la spec) : Vente vient de nbLgtMiseVente (colonne dédiée, snapshot par résidence, pas de notion
+// d'année), Offre nouvelle de la simulation manuelle année par année (offreNouvelleLgt). Comptage
+// séparé de countByFamily, mais affiché dans le même bandeau (ImpactCountersRow) pour la lisibilité.
+function countVenteOffreNouvelle(baseResidences, actuelResidences, baseOffreNouvelleLgt, actuelOffreNouvelleLgt, cutoffActuel){
+  const sumVente = (residences)=> (residences||[]).reduce((s,r)=>s+(r.nbLgtMiseVente||0),0);
+  const sumOffre = (map, uptoYear)=> Object.keys(map||{}).reduce((s,y)=> (uptoYear==null || Number(y)<=uptoYear) ? s+(Number(map[y])||0) : s, 0);
+  const ventePrevu = sumVente(baseResidences), venteRealise = sumVente(actuelResidences);
+  const offrePrevu = sumOffre(baseOffreNouvelleLgt, null), offreRealise = sumOffre(actuelOffreNouvelleLgt, cutoffActuel);
+  return {
+    'Vente': { prevu: ventePrevu, realise: venteRealise, tauxPct: ventePrevu>0? Math.round(venteRealise/ventePrevu*100) : null },
+    'Offre nouvelle': { prevu: offrePrevu, realise: offreRealise, tauxPct: offrePrevu>0? Math.round(offreRealise/offrePrevu*100) : null },
+  };
+}
+const IMPACT_COUNTER_META = {
+  'Réhabilitation': { short:'Réhab.', prevuWord:'prévues', realiseWord:'réalisées' },
+  'Remplacement de composants': { short:'RC', prevuWord:'prévus', realiseWord:'réalisés' },
+  'Démolition': { short:'Démol.', prevuWord:'prévues', realiseWord:'réalisées' },
+  'Vente': { short:'Vente', prevuWord:'prévues', realiseWord:'réalisées' },
+  'Offre nouvelle': { short:'Dévelop.', prevuWord:'prévus', realiseWord:'réalisés' },
+};
+const IMPACT_COUNTER_ORDER = ['Réhabilitation','Remplacement de composants','Démolition','Vente','Offre nouvelle'];
+// Bandeau compact de compteurs "prévu (Base) / réalisé (Actuel) / taux" par catégorie — §4.2 (Impact
+// des actions stratégiques, Réhab/RC/Démol/Vente/Offre nouvelle) et §5.2 (Investissements & Entretien
+// du parc, Réhab/RC/Démol + "reste à faire"). Composant unique réutilisé aux deux emplacements plutôt
+// que deux rendus dupliqués ; n'apparaît que pour les catégories présentes dans `counters` (une vue
+// peut ne transmettre qu'un sous-ensemble des clés).
+function ImpactCountersRow({counters}){
+  const keys = IMPACT_COUNTER_ORDER.filter((k)=>counters[k]);
+  if (!keys.length) return null;
+  return (
+    <div style={{display:'flex',gap:8,overflowX:'auto',paddingBottom:4,marginBottom:14}}>
+      {keys.map((k)=>{
+        const c = counters[k], meta = IMPACT_COUNTER_META[k];
+        return (
+          <div key={k} style={{display:'flex',alignItems:'center',gap:6,padding:'6px 12px',borderRadius:20,background:'#f5f8f7',fontSize:'.74rem',color:'var(--ce-vert-tres-fonce)',whiteSpace:'nowrap',flexShrink:0}}>
+            <b>{meta.short}</b>
+            <span style={{color:'var(--ce-vert-fonce)'}}>
+              {fmtNum(c.prevu)} {meta.prevuWord} · {fmtNum(c.realise)} {meta.realiseWord}
+              {c.tauxPct!==null && <React.Fragment> · <b style={{color:'var(--ce-corail)'}}>{c.tauxPct}%</b></React.Fragment>}
+              {c.restant!==undefined && <React.Fragment> · reste à faire {fmtNum(c.restant)}{c.restantPct!==null? ' ('+c.restantPct+'%)':''}</React.Fragment>}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+// Travaux prévus sur une résidence donnée, résumés en libellés courts (Démol./Réhab./RC/Vente) pour
+// affichage dans une liste de résidences — même catégorisation que cellCounters ci-dessus, mais au
+// niveau d'une seule résidence plutôt qu'agrégée sur une famille entière.
+function residenceTravauxLabels(r, operations, includeIdentifiees){
+  const ops = operations.filter((o)=> o.resCode===r.code && (includeIdentifiees || o.statut!=='identifie'));
+  const fams = new Set(ops.map((o)=>familyOfType(o.type)));
+  const labels = [];
+  if (fams.has('Démolition')) labels.push('Démol.');
+  if (fams.has('Réhabilitation')) labels.push('Réhab.');
+  if (fams.has('Remplacement de composants')) labels.push('RC');
+  if (r.nbLgtMiseVente>0) labels.push('Vente');
+  return labels;
+}
 
-function SegmentationGrid({residences, onSelectResidence}){
+// Projette les résidences à une année donnée : État technique (computeTechniqueProjection) et
+// distributions DPE (computeTrajectoryByResidence) recalculés à cette échéance, tous les autres
+// champs (attractivité, notes, nbLgt...) laissés tels quels (non affectés par le temps). Les
+// résidences démolies avant l'année choisie sont exclues. Réutilisée telle quelle par la Segmentation
+// en 9 familles (sélecteur d'année) — jamais recalculée indépendamment des fonctions de projection
+// déjà utilisées ailleurs dans l'outil (Impact des actions stratégiques, ViewCotation).
+function projectResidencesToYear(residences, operations, gainsGrid, year, includeIdentifiees){
+  const opsUntil = filterOpsUntil(operations, year);
+  const trajE = computeTrajectoryByResidence(residences, operations, gainsGrid||{}, year, 'energie', includeIdentifiees);
+  const trajG = computeTrajectoryByResidence(residences, operations, gainsGrid||{}, year, 'ges', includeIdentifiees);
+  return residences.filter((r)=> trajE.alive[r.code]!==false && trajG.alive[r.code]!==false).map((r)=>{
+    const techProj = computeTechniqueProjection(r, opsUntil, includeIdentifiees);
+    return Object.assign({}, r, {
+      technique: techProj ? techProj.technique : r.technique,
+      distEnergie: trajE.state[r.code] || r.distEnergie,
+      distGES: trajG.state[r.code] || r.distGES,
+    });
+  });
+}
+// Dernière année (<= year) à laquelle une réhabilitation a été simulée sur cette résidence, ou null
+// si aucune — utilisé pour marquer visuellement les réhabs déjà "réalisées" dans la grille par année.
+// Par famille de travaux (Réhab./RC/Démol. — Vente exclue, ce n'est pas une opération datée), dernière
+// année (<= year) à laquelle une action de cette famille a déjà été simulée sur cette résidence. Une
+// résidence peut avoir plusieurs travaux prévus (ex. Réhab. + RC) dont un seul déjà réalisé : le
+// marquage doit donc préciser LAQUELLE, pas juste "réalisé" au global.
+const REALIZED_FAMILY_SHORT = { 'Réhabilitation':'Réhab.', 'Remplacement de composants':'RC', 'Démolition':'Démol.' };
+// Constante de module (pas un Hook) : Object.values(REALIZED_FAMILY_SHORT) ne change jamais, inutile
+// de la recalculer par un useMemo à l'intérieur d'un composant — et surtout, un useMemo placé après un
+// retour conditionnel (cf. ImpactActionsStrategiques) viole la règle des Hooks et fait planter React.
+const REALIZABLE_LABELS = new Set(Object.values(REALIZED_FAMILY_SHORT));
+function realizedFamiliesForYear(r, operations, year, includeIdentifiees){
+  const result = {};
+  Object.keys(REALIZED_FAMILY_SHORT).forEach((fam)=>{
+    const years = operations
+      .filter((o)=> o.resCode===r.code && familyOfType(o.type)===fam && o.annee!=null && o.annee<=year && (includeIdentifiees || o.statut==='programme'))
+      .map((o)=>o.annee);
+    if (years.length) result[REALIZED_FAMILY_SHORT[fam]] = Math.max(...years);
+  });
+  return result;
+}
+
+function SegmentationGrid({residences, operations, gainsGrid, includeIdentifiees, baseImport, onSelectResidence}){
   const criteria = useMemo(()=>{
     const list = [
       {key:'attractivite', label:'Attractivité'},
@@ -1624,6 +2038,7 @@ function SegmentationGrid({residences, onSelectResidence}){
     const noteKeys = new Set();
     residences.forEach((r)=>{ if (r.notes) Object.keys(r.notes).forEach((k)=>{ if (r.notes[k]!==null && r.notes[k]!==undefined) noteKeys.add(k); }); });
     Array.from(noteKeys).sort((a,b)=>a.localeCompare(b,'fr')).forEach((k)=>list.push({key:k, label:k}));
+    list.push({key:'dpeGlobal', label:'DPE Global'});
     return list;
   }, [residences]);
 
@@ -1631,41 +2046,76 @@ function SegmentationGrid({residences, onSelectResidence}){
   const [yKey, setYKey] = useState('technique');
   const [sizeBy, setSizeBy] = useState('nbLgt');
   const [pinned, setPinned] = useState(null);
+  const [showDpeBreakdown, setShowDpeBreakdown] = useState(false);
+
+  const cutoffActuel = useMemo(()=>anneeCoupureActuel(), []);
+  const trajectoryYears = useMemo(()=>computeYearsRange(operations), [operations]);
+  const [year, setYear] = useState(null);
+  useEffect(()=>{ if (trajectoryYears.length && !trajectoryYears.includes(year)) setYear(cutoffActuel); }, [trajectoryYears]);
+
+  // Badge Base/Actuel/Cible : comparaison directe de l'année sélectionnée aux 3 repères de la spec.
+  const baseYear = (baseImport && baseImport.dateCreation) ? new Date(baseImport.dateCreation).getFullYear() : null;
+  const trajEndYear = trajectoryYears.length? trajectoryYears[trajectoryYears.length-1] : null;
+  function badgeForYear(y){ return y===baseYear ? 'Base' : y===cutoffActuel ? 'Actuel' : y===trajEndYear ? 'Cible' : null; }
+  const yearBadge = badgeForYear(year);
+
+  const projectedResidences = useMemo(()=>{
+    if (year===null) return residences;
+    return projectResidencesToYear(residences, operations, gainsGrid, year, includeIdentifiees);
+  }, [residences, operations, gainsGrid, year, includeIdentifiees]);
 
   const xLabel = (criteria.find((c)=>c.key===xKey)||{}).label || xKey;
   const yLabel = (criteria.find((c)=>c.key===yKey)||{}).label || yKey;
 
-  const { rows, colTotals, rowTotals, maxCell, unclassified, maxVal } = useMemo(()=>{
-    const xVals = residences.map((r)=>critValue(r,xKey)).filter((v)=>v!==null&&v!==undefined&&!isNaN(v)&&v>0);
-    const yVals = residences.map((r)=>critValue(r,yKey)).filter((v)=>v!==null&&v!==undefined&&!isNaN(v)&&v>0);
-    const xMax = xVals.length? Math.max(...xVals) : null;
-    const yMax = yVals.length? Math.max(...yVals) : null;
+  const dataAvailability = useMemo(()=>{
+    const opsVisible = operations.filter((o)=> includeIdentifiees || o.statut!=='identifie');
+    return {
+      rehab: opsVisible.some((o)=>familyOfType(o.type)==='Réhabilitation'),
+      rc: opsVisible.some((o)=>familyOfType(o.type)==='Remplacement de composants'),
+      demolition: opsVisible.some((o)=>familyOfType(o.type)==='Démolition'),
+      vente: residences.some((r)=>r.nbLgtMiseVente!==null && r.nbLgtMiseVente!==undefined),
+    };
+  }, [residences, operations, includeIdentifiees]);
+
+  const { rows, colTotals, rowTotals, maxCell, unclassified, maxVal, xBands, yBands } = useMemo(()=>{
+    const residences = projectedResidences;
+    const xBands = bandsForCriterion(xKey);
+    const yBands = bandsForCriterion(yKey);
+    const xClassifier = classifierForCriterion(residences, xKey);
+    const yClassifier = classifierForCriterion(residences, yKey);
 
     const classified = [];
     let unclassifiedCount = 0;
     residences.forEach((r)=>{
-      const xv = critValue(r,xKey), yv = critValue(r,yKey);
-      const xPct = (xv!==null&&xv!==undefined&&!isNaN(xv)&&xMax>0) ? (xv/xMax*100) : null;
-      const yPct = (yv!==null&&yv!==undefined&&!isNaN(yv)&&yMax>0) ? (yv/yMax*100) : null;
-      const xBand = bandOf(xPct), yBand = bandOf(yPct);
+      const xBand = xClassifier(r), yBand = yClassifier(r);
       if (!xBand || !yBand) { unclassifiedCount++; return; }
       classified.push({ r, xBand, yBand });
     });
 
-    const cellsOf = (yBand)=> SEG_BANDS.slice().reverse().map((xBand)=>{
+    const cellsOf = (yBand)=> xBands.slice().reverse().map((xBand)=>{
       const members = classified.filter((c)=>c.yBand===yBand && c.xBand===xBand).map((c)=>c.r);
       const value = sizeBy==='nbLgt' ? members.reduce((s,r)=>s+(r.nbLgt||0),0) : members.length;
-      return { xBand, yBand, members, value };
+      const counters = cellCounters(members, operations, includeIdentifiees);
+      return { xBand, yBand, members, value, counters };
     });
-    const rows = SEG_BANDS.map((yBand)=>({ yBand, cells: cellsOf(yBand) }));
+    const rows = yBands.map((yBand)=>({ yBand, cells: cellsOf(yBand) }));
     const maxCell = Math.max(1, ...rows.flatMap((row)=>row.cells.map((c)=>c.value)));
     const rowTotals = rows.map((row)=>row.cells.reduce((s,c)=>s+c.value,0));
-    const colTotals = SEG_BANDS.slice().reverse().map((_,ci)=>rows.reduce((s,row)=>s+row.cells[ci].value,0));
+    const colTotals = xBands.slice().reverse().map((_,ci)=>rows.reduce((s,row)=>s+row.cells[ci].value,0));
     const maxVal = sizeBy==='nbLgt' ? residences.reduce((s,r)=>s+(r.nbLgt||0),0) : residences.length;
-    return { rows, colTotals, rowTotals, maxCell, unclassified: unclassifiedCount, maxVal };
-  }, [residences, xKey, yKey, sizeBy]);
+    return { rows, colTotals, rowTotals, maxCell, unclassified: unclassifiedCount, maxVal, xBands, yBands };
+  }, [projectedResidences, xKey, yKey, sizeBy, operations, includeIdentifiees]);
 
   const pinnedMembers = pinned ? (rows.find((r)=>r.yBand===pinned.yBand).cells.find((c)=>c.xBand===pinned.xBand).members) : null;
+  const pinnedBreakdown = useMemo(()=>{
+    if (!pinnedMembers) return null;
+    const distE = {A:0,B:0,C:0,D:0,E:0,F:0,G:0,NR:0}, distG = {A:0,B:0,C:0,D:0,E:0,F:0,G:0,NR:0};
+    pinnedMembers.forEach((r)=>{
+      if (r.distEnergie) Object.keys(distE).forEach((c)=>{ distE[c]+=(r.distEnergie[c]||0); });
+      if (r.distGES) Object.keys(distG).forEach((c)=>{ distG[c]+=(r.distGES[c]||0); });
+    });
+    return { distE, distG };
+  }, [pinnedMembers]);
   function togglePinned(cell){
     setPinned((cur)=> (cur && cur.xBand===cell.xBand && cur.yBand===cell.yBand) ? null : {xBand:cell.xBand, yBand:cell.yBand});
   }
@@ -1676,14 +2126,23 @@ function SegmentationGrid({residences, onSelectResidence}){
         <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700}}>Segmentation en 9 familles</h2>
         <div style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'flex-end'}}>
           <div style={{display:'flex',flexDirection:'column',gap:4}}>
+            <label style={{fontSize:'.66rem',fontWeight:700,color:'var(--ce-vert-fonce)',textTransform:'uppercase'}}>Année</label>
+            <div style={{display:'flex',alignItems:'center',gap:6}}>
+              <select className="ce-select" value={year??''} onChange={(e)=>{ setYear(Number(e.target.value)); setPinned(null); }}>
+                {trajectoryYears.map((y)=>{ const b = badgeForYear(y); return <option key={y} value={y}>{y}{b? ' — '+b:''}</option>; })}
+              </select>
+              {yearBadge && <span style={{fontSize:'.66rem',fontWeight:700,color:'#fff',background:COMPARE_COLORS[yearBadge.toLowerCase()],borderRadius:10,padding:'2px 8px'}}>{yearBadge}</span>}
+            </div>
+          </div>
+          <div style={{display:'flex',flexDirection:'column',gap:4}}>
             <label style={{fontSize:'.66rem',fontWeight:700,color:'var(--ce-vert-fonce)',textTransform:'uppercase'}}>Axe X</label>
-            <select className="ce-select" value={xKey} onChange={(e)=>setXKey(e.target.value)}>
+            <select className="ce-select" value={xKey} onChange={(e)=>{setXKey(e.target.value); setPinned(null);}}>
               {criteria.map((c)=><option key={c.key} value={c.key} disabled={c.key===yKey}>{c.label}</option>)}
             </select>
           </div>
           <div style={{display:'flex',flexDirection:'column',gap:4}}>
             <label style={{fontSize:'.66rem',fontWeight:700,color:'var(--ce-vert-fonce)',textTransform:'uppercase'}}>Axe Y</label>
-            <select className="ce-select" value={yKey} onChange={(e)=>setYKey(e.target.value)}>
+            <select className="ce-select" value={yKey} onChange={(e)=>{setYKey(e.target.value); setPinned(null);}}>
               {criteria.map((c)=><option key={c.key} value={c.key} disabled={c.key===xKey}>{c.label}</option>)}
             </select>
           </div>
@@ -1701,9 +2160,9 @@ function SegmentationGrid({residences, onSelectResidence}){
         <div style={{display:'flex',gap:8}}>
           <div style={{display:'flex',alignItems:'center',justifyContent:'center',writingMode:'vertical-rl',transform:'rotate(180deg)',fontSize:'.72rem',fontWeight:700,color:'var(--ce-vert-fonce)',padding:'4px 0'}}>{yLabel}</div>
           <div>
-            <div style={{display:'grid',gridTemplateColumns:'90px repeat(3, 130px)',gap:4}}>
+            <div style={{display:'grid',gridTemplateColumns:'92px repeat(3, 142px)',gap:4}}>
               <div></div>
-              {SEG_BANDS.slice().reverse().map((xBand)=>(
+              {xBands.slice().reverse().map((xBand)=>(
                 <div key={xBand} style={{textAlign:'center',fontSize:'.68rem',fontWeight:700,color:'var(--ce-vert-fonce)'}}>{xBand}</div>
               ))}
               {rows.map((row)=>(
@@ -1712,17 +2171,26 @@ function SegmentationGrid({residences, onSelectResidence}){
                   {row.cells.map((cell)=>{
                     const alpha = 0.1 + 0.8*(cell.value/maxCell);
                     const isPinned = pinned && pinned.xBand===cell.xBand && pinned.yBand===cell.yBand;
+                    const counterParts = [
+                      dataAvailability.rehab && ('Réhab '+fmtNum(cell.counters.rehab)),
+                      dataAvailability.rc && ('RC '+fmtNum(cell.counters.rc)),
+                      dataAvailability.demolition && ('Démol '+fmtNum(cell.counters.demolition)),
+                      dataAvailability.vente && ('Vente '+fmtNum(cell.counters.vente)),
+                    ].filter(Boolean);
                     return (
                       <div key={cell.xBand}
                         onClick={()=>togglePinned(cell)}
                         style={{
-                          height:80,borderRadius:8,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',
+                          height:100,borderRadius:8,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:2,padding:'4px 3px',
                           background: cell.value>0 ? 'rgba(0,146,97,'+alpha.toFixed(2)+')' : '#f5f8f7',
                           border: isPinned? '2px solid var(--ce-vert-tres-fonce)' : '1px solid #eef4f2',
                           cursor:'pointer', transition:'border .1s',
                         }}>
-                        <span style={{fontSize:'1.1rem',fontWeight:700,color: alpha>0.5? '#fff':'var(--ce-vert-tres-fonce)'}}>{sizeBy==='nbLgt'? fmtNum(cell.value): cell.value}</span>
-                        <span style={{fontSize:'.65rem',color: alpha>0.5? '#fff':'var(--ce-vert-fonce)'}}>{cell.members.length} résidence{cell.members.length>1?'s':''}</span>
+                        <span style={{fontSize:'1.05rem',fontWeight:700,color: alpha>0.5? '#fff':'var(--ce-vert-tres-fonce)'}}>{sizeBy==='nbLgt'? fmtNum(cell.value): cell.value}</span>
+                        <span style={{fontSize:'.63rem',color: alpha>0.5? '#fff':'var(--ce-vert-fonce)'}}>{cell.members.length} résidence{cell.members.length>1?'s':''}</span>
+                        {counterParts.length>0 && (
+                          <span style={{fontSize:'.58rem',lineHeight:1.25,textAlign:'center',color: alpha>0.5? '#fff':'var(--ce-vert-fonce)'}}>{counterParts.join(' · ')}</span>
+                        )}
                       </div>
                     );
                   })}
@@ -1733,57 +2201,571 @@ function SegmentationGrid({residences, onSelectResidence}){
           </div>
         </div>
 
-        <div style={{flex:1,minWidth:220,border:'1px solid #eef4f2',borderRadius:8,padding:'10px 14px',maxHeight:280,overflowY:'auto'}}>
+        <div style={{flex:1,minWidth:220,border:'1px solid #eef4f2',borderRadius:8,padding:'10px 14px',maxHeight:320,overflowY:'auto'}}>
           {!pinned && <div style={{fontSize:'.78rem',color:'#9fb3ae'}}>Cliquez sur une famille pour voir la liste des résidences concernées.</div>}
           {pinned && (
             <React.Fragment>
-              <div style={{fontSize:'.78rem',fontWeight:700,color:'var(--ce-vert-tres-fonce)',marginBottom:8}}>
-                {yLabel} : {pinned.yBand} · {xLabel} : {pinned.xBand} — {pinnedMembers.length} résidence{pinnedMembers.length>1?'s':''}
-              </div>
-              {pinnedMembers.length===0 && <div style={{fontSize:'.76rem',color:'#9fb3ae'}}>Aucune résidence.</div>}
-              {pinnedMembers.map((r)=>(
-                <div key={r.code} onClick={()=>onSelectResidence && onSelectResidence(r)} style={{fontSize:'.76rem',color:'var(--ce-vert-fonce)',padding:'3px 0',borderBottom:'1px solid #f0f5f3',cursor:onSelectResidence?'pointer':'default'}}>
-                  {r.nom || r.code} <span style={{color:'#9fb3ae'}}>— {fmtNum(r.nbLgt)} lgt</span>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8,marginBottom:8}}>
+                <div style={{fontSize:'.78rem',fontWeight:700,color:'var(--ce-vert-tres-fonce)'}}>
+                  {yLabel} : {pinned.yBand} · {xLabel} : {pinned.xBand} — {pinnedMembers.length} résidence{pinnedMembers.length>1?'s':''}
                 </div>
-              ))}
+                <button className="ce-btn-outline ce-btn-sm" onClick={()=>setShowDpeBreakdown((v)=>!v)}>{showDpeBreakdown? 'Masquer répartition DPE' : 'Répartition DPE'}</button>
+              </div>
+              {showDpeBreakdown && pinnedBreakdown && (
+                <div style={{marginBottom:10,padding:'8px 0',borderBottom:'1px solid #f0f5f3'}}>
+                  {[['Énergie','distE'],['GES','distG']].map(([label,dk])=>(
+                    <div key={dk} style={{display:'flex',alignItems:'center',gap:6,marginBottom:6,flexWrap:'wrap'}}>
+                      <span style={{width:56,fontSize:'.68rem',fontWeight:700,color:'var(--ce-vert-fonce)'}}>{label}</span>
+                      {['A','B','C','D','E','F','G'].map((cl)=>(
+                        <span key={cl} style={{display:'flex',flexDirection:'column',alignItems:'center',gap:1}}>
+                          <DpeBadge cl={cl} />
+                          <span style={{fontSize:'.6rem',color:'var(--ce-vert-fonce)'}}>{fmtNum(pinnedBreakdown[dk][cl])}</span>
+                        </span>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {pinnedMembers.length===0 && <div style={{fontSize:'.76rem',color:'#9fb3ae'}}>Aucune résidence.</div>}
+              {pinnedMembers.map((r)=>{
+                const travaux = residenceTravauxLabels(r, operations, includeIdentifiees);
+                const realizedFamilies = year!==null ? realizedFamiliesForYear(r, operations, year, includeIdentifiees) : {};
+                return (
+                  <div key={r.code} onClick={()=>onSelectResidence && onSelectResidence(r)} style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:8,fontSize:'.76rem',color:'var(--ce-vert-fonce)',padding:'3px 0',borderBottom:'1px solid #f0f5f3',cursor:onSelectResidence?'pointer':'default'}}>
+                    <span>{r.nom || r.code} <span style={{color:'#9fb3ae'}}>— {fmtNum(r.nbLgt)} lgt{travaux.length>0? ' ('+travaux.join(', ')+')' : ''}</span></span>
+                    <span style={{display:'flex',gap:5,alignItems:'center',flexShrink:0}}>
+                      {Object.keys(realizedFamilies).map((fam)=>(
+                        <span key={fam} title={fam+' réalisé en '+realizedFamilies[fam]} style={{display:'flex',alignItems:'center',gap:2,fontSize:'.62rem',fontWeight:700,color:'var(--ce-vert-principal)',background:'#e7f5ee',borderRadius:8,padding:'1px 6px'}}>✓ {fam}</span>
+                      ))}
+                      <DpeBadge cl={worstPresentClass(r.distEnergie)} />
+                      <DpeBadge cl={worstPresentClass(r.distGES)} />
+                    </span>
+                  </div>
+                );
+              })}
             </React.Fragment>
           )}
         </div>
       </div>
 
       <p style={{fontSize:'.7rem',color:'var(--ce-vert-fonce)',marginTop:12,lineHeight:1.5}}>
-        Chaque critère est ramené en pourcentage de son maximum observé dans le fichier importé, puis classé
-        « Très bon » (≥ 70), « Bon » (50 à 70) ou « Mauvais » (&lt; 50). Les familles disponibles dans les menus
-        sont détectées automatiquement parmi les colonnes de notation du fichier (Attractivité, État technique,
-        et toute autre colonne de note/moyenne présente).
+        Attractivité, État technique et notes sont ramenés en pourcentage de leur maximum observé dans le fichier
+        importé, puis classés « Très bon » (≥ 70), « Bon » (50 à 70) ou « Mauvais » (&lt; 50). Le DPE Global suit
+        des seuils absolus propres au DPE (au moins un logement E/F/G → Performant -, moins de 80% de logements
+        A/B/C → Performant ±, sinon Performant +) — c'est une règle de classement Cellance, pas une colonne du
+        gabarit importé. Réhab/RC/Démolition/Vente sont toujours comptés en logements, quelle que soit la bascule
+        de taille des familles.
         {unclassified>0 && <span> {unclassified} résidence{unclassified>1?'s':''} non classée{unclassified>1?'s':''} (donnée manquante sur l'un des deux critères).</span>}
       </p>
     </div>
   );
 }
 
-function ViewCotation({residences, onSelectResidence, operations, includeIdentifiees, baseImport}){
+/* ---------------- Impact des actions stratégiques (avant/après, sur une même version) ----------------
+   Contrairement à la Segmentation en 9 familles (comparaison de deux versions sauvegardées), ce
+   tableau compare deux instants dans le temps d'une même version : le fichier importé tel quel, et
+   une projection de cette même donnée après application des opérations simulées jusqu'à une
+   échéance calendaire choisie. Axes fixes (non configurables) : État technique (seuils absolus,
+   cf. technicalBand) × DPE Global (cf. dpeGlobalBand, partagé avec la Segmentation en 9 familles). */
+function buildEcheanceOptions(operations){
+  const currentYear = new Date().getFullYear();
+  const opYears = operations.map((o)=>o.annee).filter((y)=>y!==null && y!==undefined && !isNaN(y));
+  // Une option par année calendaire (pas seulement des jalons +5/+10/...) jusqu'à la dernière année
+  // d'opération simulée, avec un horizon minimum de 5 ans même sans aucune opération dans le fichier.
+  const maxOpYear = opYears.length? Math.max(...opYears) : currentYear+10;
+  const endYear = Math.max(maxOpYear, currentYear+5);
+  const years = [];
+  for (let y=currentYear+1; y<=endYear; y++) years.push(y);
+  return years.length? years : [currentYear+10];
+}
+
+const IMPACT_TECH_BANDS = ['Bon état','État moyen','État à améliorer'];
+// Couleurs des 9 familles du tableau Impact, façon étiquette DPE : palette ColorBrewer RdYlGn à 9
+// classes (rouge foncé = pire famille, orange/jaune au centre, vert foncé = meilleure famille) —
+// une palette de référence publique, pas une couleur de marque Cellance, choisie pour son
+// dégradé rouge -> vert immédiatement lisible.
+const IMPACT_FAMILY_RDYLGN9 = ['#a50026','#d73027','#f46d43','#fdae61','#fee08b','#d9ef8b','#a6d96a','#66bd63','#1a9850'];
+// Numérotation des 9 familles façon matrice à 9 cases (1 = meilleure cellule unique, 9 = pire
+// cellule unique, paliers de 1/2/3/2/1 cellules le long de la diagonale) — convention de
+// présentation pour la couleur, pas une donnée du fichier importé.
+const IMPACT_FAMILY_MAP = {
+  'Bon état|Performant +': 1,
+  'Bon état|Performant ±': 2,
+  'État moyen|Performant +': 3,
+  'Bon état|Performant -': 4,
+  'État moyen|Performant ±': 5,
+  'État à améliorer|Performant +': 6,
+  'État moyen|Performant -': 7,
+  'État à améliorer|Performant ±': 8,
+  'État à améliorer|Performant -': 9,
+};
+function impactFamilyColor(techBand, dpeBand){
+  const n = IMPACT_FAMILY_MAP[techBand+'|'+dpeBand];
+  return n ? IMPACT_FAMILY_RDYLGN9[9-n] : '#f5f8f7';
+}
+function relLuminance(hex){
+  const h = hex.replace('#','');
+  const toLin = (c)=>{ c/=255; return c<=0.03928? c/12.92 : Math.pow((c+0.055)/1.055,2.4); };
+  const r=toLin(parseInt(h.substring(0,2),16)), g=toLin(parseInt(h.substring(2,4),16)), b=toLin(parseInt(h.substring(4,6),16));
+  return 0.2126*r+0.7152*g+0.0722*b;
+}
+function textColorFor(bgHex){ return relLuminance(bgHex)<0.5 ? '#fff' : 'var(--ce-vert-tres-fonce)'; }
+function hexToRgba(hex, alpha){
+  const h = hex.replace('#','');
+  const r=parseInt(h.substring(0,2),16), g=parseInt(h.substring(2,4),16), b=parseInt(h.substring(4,6),16);
+  return 'rgba('+r+','+g+','+b+','+alpha+')';
+}
+// Classe DPE la moins bonne effectivement présente (≥1 logement) dans une distribution — utilisée
+// pour résumer en une seule lettre le DPE d'une résidence après projection (la projection donne une
+// distribution, pas une lettre unique), même logique que « le moins bon des deux » de dpeGlobalBand.
+function worstPresentClass(dist){
+  if (!dist) return null;
+  for (const cl of CLASS_ORDER){ if ((dist[cl]||0)>0) return cl; }
+  return null;
+}
+// Couleur du delta définie par position de cellule (pas par signe brut du delta) : une cellule en
+// haut à droite (bonne position) où le delta est positif progresse réellement -> vert ; une cellule
+// en bas à gauche (mauvaise position) où le delta est positif se dégrade -> corail. Les 3 cellules de
+// la diagonale médiane (mi-bon/mi-mauvais sur les deux axes) restent neutres : leur lecture n'est pas
+// univoque et forcer une couleur introduirait un biais non demandé par la spec.
+function deltaQuality(techBand, dpeBand){
+  const xRank = DPE_GLOBAL_BANDS.indexOf(dpeBand); // 0 = Performant + (meilleur) .. 2 = Performant - (pire)
+  const yRank = IMPACT_TECH_BANDS.indexOf(techBand); // 0 = Bon état (meilleur) .. 2 = État à améliorer (pire)
+  return (2-xRank)+(2-yRank); // 0 (pire cellule) .. 4 (meilleure cellule)
+}
+function deltaColorKind(techBand, dpeBand, delta){
+  if (delta===0) return 'neutral';
+  const quality = deltaQuality(techBand, dpeBand);
+  if (quality>2) return delta>0? 'good' : 'bad';
+  if (quality<2) return delta>0? 'bad' : 'good';
+  return 'neutral';
+}
+
+function emptyImpactCells(){
+  const dpeBands = DPE_GLOBAL_BANDS;
+  const emptyDist = ()=>({A:0,B:0,C:0,D:0,E:0,F:0,G:0,NR:0});
+  const c = {}; IMPACT_TECH_BANDS.forEach((tb)=>dpeBands.forEach((db)=>{ c[tb+'|'+db]={value:0,members:[],distE:emptyDist(),distG:emptyDist()}; }));
+  return c;
+}
+// Grille projetée (Actuel ou Cible) à une échéance donnée : mêmes deux fonctions de projection que le
+// reste de l'outil (computeTrajectoryByResidence pour le DPE, computeTechniqueProjection pour l'État
+// technique), jamais recalculées différemment entre Actuel et Cible — seule l'échéance change (cf.
+// §2.1 de la spec, filterOpsUntil()).
+function computeImpactCellsForEcheance(residences, operations, gainsGrid, echeance, includeIdentifiees, offreNouvelleLgt){
+  const opsJusquaEcheance = filterOpsUntil(operations, echeance);
+  const trajE = computeTrajectoryByResidence(residences, operations, gainsGrid||{}, echeance, 'energie', includeIdentifiees);
+  const trajG = computeTrajectoryByResidence(residences, operations, gainsGrid||{}, echeance, 'ges', includeIdentifiees);
+
+  const cells = emptyImpactCells();
+  function addToCell(k, r, distE, distG){
+    cells[k].value += (r.nbLgt||0);
+    cells[k].members.push(r);
+    if (distE) Object.keys(cells[k].distE).forEach((cl)=>{ cells[k].distE[cl]+=(distE[cl]||0); });
+    if (distG) Object.keys(cells[k].distG).forEach((cl)=>{ cells[k].distG[cl]+=(distG[cl]||0); });
+  }
+
+  const nonProjetees = [];
+  let parcATraiterLgt = 0; const parcATraiterRes = [];
+
+  residences.forEach((r)=>{
+    // Démolition simulée avant l'échéance : sort du parc (cf. section 6 de la spec) — la cascade DPE
+    // (Énergie et GES) détecte déjà la démolition (même règle que resolveGain/type /^demol/), on la
+    // réutilise plutôt que de dupliquer la détection.
+    const demolie = (trajE.alive[r.code]===false) || (trajG.alive[r.code]===false);
+    if (demolie) return;
+
+    const techProj = computeTechniqueProjection(r, opsJusquaEcheance, includeIdentifiees);
+    const note = techProj ? techProj.technique : r.technique;
+    if (!techProj) nonProjetees.push(r);
+    const tb = technicalBand(note);
+
+    const distE = trajE.state[r.code], distG = trajG.state[r.code];
+    const db = dpeGlobalBand({ distEnergie: distE, distGES: distG });
+    if (db===null && !nonProjetees.includes(r)) nonProjetees.push(r);
+
+    if (tb && db){ addToCell(tb+'|'+db, r, distE, distG); }
+
+    const mauvaisTech = note!==null && note!==undefined && !isNaN(note) && note<50;
+    const mauvaisDpe = db==='Performant -';
+    if (mauvaisTech || mauvaisDpe){ parcATraiterLgt += (r.nbLgt||0); parcATraiterRes.push(r); }
+  });
+
+  // Construction neuve simulée (offre nouvelle, saisie manuelle année par année) : cumul jusqu'à
+  // l'échéance, classée par hypothèse par défaut en Bon état × Performant + (aucune donnée d'état
+  // technique ou de DPE propre n'existe pour du neuf simulé). Comptée en "NR" dans le détail DPE de
+  // la cellule (pas de classe A-G connue) pour que le total du détail reste cohérent avec l'effectif.
+  const cumulNeuf = Object.keys(offreNouvelleLgt||{}).reduce((s,y)=> Number(y)<=echeance ? s+(Number(offreNouvelleLgt[y])||0) : s, 0);
+  if (cumulNeuf>0){
+    const k = 'Bon état|Performant +';
+    cells[k].value += cumulNeuf;
+    cells[k].distE.NR += cumulNeuf;
+    cells[k].distG.NR += cumulNeuf;
+    cells[k].members.push({ code:'_neuf_'+echeance, nom:'Logements neufs simulés (construction)', nbLgt:cumulNeuf, isNeuf:true });
+  }
+
+  return { cells, nonProjetees, parcATraiterLgt, parcATraiterRes, trajE, trajG, cumulNeuf, echeance };
+}
+// Grille Base : instantané figé de la version sauvegardée (baseImport.data.residences), jamais
+// reprojetée — même convention que baseComparePoints de ViewCotation (cf. §2.1 de la spec).
+function computeImpactCellsRaw(residences){
+  const cells = emptyImpactCells();
+  let unclassified = 0;
+  residences.forEach((r)=>{
+    const tb = technicalBand(r.technique), db = dpeGlobalBand(r);
+    if (tb && db){
+      const k = tb+'|'+db;
+      cells[k].value += (r.nbLgt||0);
+      cells[k].members.push(r);
+      if (r.distEnergie) Object.keys(cells[k].distE).forEach((cl)=>{ cells[k].distE[cl]+=(r.distEnergie[cl]||0); });
+      if (r.distGES) Object.keys(cells[k].distG).forEach((cl)=>{ cells[k].distG[cl]+=(r.distGES[cl]||0); });
+    } else unclassified++;
+  });
+  return { cells, unclassified };
+}
+function computeImpactActions(residences, operations, gainsGrid, offreNouvelleLgt, baseImport, cutoffActuel, echeanceCible, includeIdentifiees){
+  const actuel = computeImpactCellsForEcheance(residences, operations, gainsGrid, cutoffActuel, includeIdentifiees, offreNouvelleLgt);
+  const cible = computeImpactCellsForEcheance(residences, operations, gainsGrid, echeanceCible, includeIdentifiees, offreNouvelleLgt);
+  const base = baseImport ? computeImpactCellsRaw(baseImport.data.residences||[]) : null;
+  return { base, actuel, cible, dpeBands: DPE_GLOBAL_BANDS };
+}
+
+const IMPACT_GRID_LABELS = { base:'Base', actuel:'Actuel', cible:'Cible' };
+function ImpactActionsStrategiques({residences, operations, includeIdentifiees, gainsGrid, hasGainsGrid, offreNouvelleLgt, baseImport, onSelectResidence}){
+  const echeanceOptions = useMemo(()=>buildEcheanceOptions(operations), [operations]);
+  const [echeanceCible, setEcheanceCible] = useState(null);
+  const [compare, setCompare] = useState(defaultCompareState());
+  const [pinned, setPinned] = useState(null); // {which:'base'|'actuel'|'cible'|'parcATraiter'|'nonProjetees', tb, db}
+  const [showDpeBreakdown, setShowDpeBreakdown] = useState(false);
+  const hasCompareBase = !!baseImport;
+  const compareState = clampCompareState(compare, hasCompareBase);
+  const cutoffActuel = useMemo(()=>anneeCoupureActuel(), []);
+
+  useEffect(()=>{
+    if (echeanceOptions.length && (echeanceCible===null || !echeanceOptions.includes(echeanceCible))){
+      const endYear = trajectoryEndYear(operations);
+      const preferred = echeanceOptions.includes(endYear) ? endYear : echeanceOptions[echeanceOptions.length-1];
+      setEcheanceCible(preferred);
+    }
+  }, [echeanceOptions, operations]);
+
+  const result = useMemo(()=>{
+    if (echeanceCible===null) return null;
+    return computeImpactActions(residences, operations, gainsGrid, offreNouvelleLgt, baseImport, cutoffActuel, echeanceCible, includeIdentifiees);
+  }, [residences, operations, gainsGrid, offreNouvelleLgt, baseImport, cutoffActuel, echeanceCible, includeIdentifiees]);
+
+  // Pour ne pas afficher un compteur à 0 trompeur (aucune opération de cette famille dans le fichier
+  // entier) vs un 0 réel (la famille existe ailleurs mais pas dans cette cellule) — même principe que
+  // la Segmentation en 9 familles. Calculé avant le `return null` ci-dessous : un Hook ne doit jamais
+  // être appelé après un retour conditionnel (sinon le nombre de Hooks diffère d'un rendu à l'autre
+  // et React plante — c'était le bug d'écran blanc sur l'onglet Base de cotation).
+  const dataAvailability = useMemo(()=>{
+    const opsVisible = operations.filter((o)=> includeIdentifiees || o.statut!=='identifie');
+    return {
+      rehab: opsVisible.some((o)=>familyOfType(o.type)==='Réhabilitation'),
+      rc: opsVisible.some((o)=>familyOfType(o.type)==='Remplacement de composants'),
+      demolition: opsVisible.some((o)=>familyOfType(o.type)==='Démolition'),
+      vente: residences.some((r)=>r.nbLgtMiseVente!==null && r.nbLgtMiseVente!==undefined),
+    };
+  }, [residences, operations, includeIdentifiees]);
+
+  // Bandeau de compteurs §4.2 : n'existe que si Base est définie (a besoin d'un "prévu en Base").
+  // Calculé avant le retour conditionnel ci-dessous (règle des Hooks, cf. commentaire dataAvailability).
+  const impactCounters = useMemo(()=>{
+    const base = result && result.base;
+    if (!base || !baseImport) return null;
+    const baseOps = (baseImport.simOperations||[]).filter((o)=> baseImport.includeIdentifiees || o.statut==='programme');
+    const actuelOpsRealisees = filterOpsUntil(operations, cutoffActuel).filter((o)=> includeIdentifiees || o.statut==='programme');
+    const famCounters = countByFamily(baseOps, actuelOpsRealisees, residences);
+    const venteOffre = countVenteOffreNouvelle(baseImport.data.residences, residences, baseImport.offreNouvelleLgt, offreNouvelleLgt, cutoffActuel);
+    return Object.assign({}, famCounters, venteOffre);
+  }, [result, baseImport, operations, residences, includeIdentifiees, cutoffActuel, offreNouvelleLgt]);
+
+  if (!result || echeanceCible===null) return null;
+
+  const { base, actuel, cible, dpeBands } = result;
+  const gridsByKey = { base, actuel, cible };
+  // KPI "Parc à traiter"/"non projetées"/"construction neuve cumulée" restent orientés Cible (l'état
+  // final visé par le PSP), comme dans l'ancienne grille "après travaux (échéance)".
+  const { nonProjetees, cumulNeuf, parcATraiterLgt, parcATraiterRes } = cible;
+
+  // Résume le DPE d'une résidence en une seule lettre pour l'affichage en liste : valeur brute du
+  // fichier (dpeEnergie/dpeGES) pour Base, classe la moins bonne de la distribution projetée (cf.
+  // worstPresentClass) pour Actuel/Cible (la projection ne donne qu'une distribution, jamais une
+  // lettre unique).
+  function dpeBadgesFor(r, which){
+    if (r.isNeuf) return null;
+    const grid = gridsByKey[which];
+    const energieCl = which==='base' ? r.dpeEnergie : worstPresentClass(grid.trajE.state[r.code]);
+    const gesCl = which==='base' ? r.dpeGES : worstPresentClass(grid.trajG.state[r.code]);
+    return (
+      <span style={{display:'flex',gap:3,flexShrink:0}}>
+        <DpeBadge cl={energieCl} />
+        <DpeBadge cl={gesCl} />
+      </span>
+    );
+  }
+  function residenceRow(r, which){
+    if (r.isNeuf){
+      return (
+        <div key={r.code} style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:8,fontSize:'.76rem',color:'#9fb3ae',fontStyle:'italic',padding:'3px 0',borderBottom:'1px solid #f0f5f3'}}>
+          <span>{r.nom} <span style={{color:'#9fb3ae'}}>— {fmtNum(r.nbLgt)} logements neufs construits</span></span>
+        </div>
+      );
+    }
+    const travaux = residenceTravauxLabels(r, operations, includeIdentifiees);
+    // Base est un instantané figé (pas de notion de "déjà réalisé" à une échéance) ; Actuel/Cible
+    // utilisent respectivement anneeCoupureActuel()/l'échéance Cible choisie, cf. realizedFamiliesForYear.
+    const yearForRealized = which==='actuel' ? cutoffActuel : which==='cible' ? echeanceCible : null;
+    const realized = yearForRealized!==null ? realizedFamiliesForYear(r, operations, yearForRealized, includeIdentifiees) : {};
+    return (
+      <div key={r.code} onClick={()=>onSelectResidence && onSelectResidence(r)}
+        style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:8,fontSize:'.76rem',color:'var(--ce-vert-fonce)',padding:'3px 0',borderBottom:'1px solid #f0f5f3',cursor:onSelectResidence?'pointer':'default'}}>
+        <span>{r.nom || r.code} <span style={{color:'#9fb3ae'}}>— {fmtNum(r.nbLgt)} lgt</span></span>
+        <span style={{display:'flex',gap:4,alignItems:'center',flexShrink:0,flexWrap:'wrap'}}>
+          {travaux.map((t)=>{
+            const trackable = REALIZABLE_LABELS.has(t);
+            const isRealized = trackable && realized[t]!==undefined;
+            return (
+              <span key={t} title={trackable? (isRealized? t+' réalisé en '+realized[t] : t+' pas encore réalisé') : t}
+                style={{fontSize:'.62rem',fontWeight:700,borderRadius:8,padding:'1px 6px',color: isRealized?'var(--ce-vert-principal)':'var(--ce-vert-fonce)',background: isRealized?'#e7f5ee':'#f0f5f3'}}>
+                {isRealized?'✓ ':''}{t}
+              </span>
+            );
+          })}
+          {dpeBadgesFor(r, which)}
+        </span>
+      </div>
+    );
+  }
+
+  function renderGrid(which, title){
+    const cells = gridsByKey[which].cells;
+    const showDelta = which!=='base' && compareState.base && !!base;
+    return (
+      <div style={{flex:1,minWidth:280}}>
+        <div style={{fontSize:'.78rem',fontWeight:700,color:'var(--ce-vert-tres-fonce)',marginBottom:8,textAlign:'center'}}>{title}</div>
+        <div style={{display:'grid',gridTemplateColumns:'98px repeat(3, 116px)',gap:4}}>
+          <div></div>
+          {dpeBands.slice().reverse().map((db)=>(
+            <div key={db} style={{textAlign:'center',fontSize:'.62rem',fontWeight:700,color:'var(--ce-vert-fonce)'}}>{db}</div>
+          ))}
+          {IMPACT_TECH_BANDS.map((tb)=>(
+            <React.Fragment key={tb}>
+              <div style={{display:'flex',alignItems:'center',fontSize:'.62rem',fontWeight:700,color:'var(--ce-vert-fonce)'}}>{tb}</div>
+              {dpeBands.slice().reverse().map((db)=>{
+                const k = tb+'|'+db;
+                const cell = cells[k];
+                const bg = impactFamilyColor(tb, db);
+                const txt = textColorFor(bg);
+                const background = cell.value>0 ? bg : hexToRgba(bg, 0.15);
+                const isPinned = pinned && pinned.which===which && pinned.tb===tb && pinned.db===db;
+                let deltaInfo = null;
+                if (showDelta){
+                  const delta = cell.value - base.cells[k].value;
+                  const kind = deltaColorKind(tb, db, delta);
+                  const color = kind==='good' ? 'var(--ce-vert-principal)' : kind==='bad' ? 'var(--ce-corail)' : 'var(--ce-vert-fonce)';
+                  deltaInfo = { delta, color };
+                }
+                const textColor = cell.value>0 ? txt : 'var(--ce-vert-fonce)';
+                return (
+                  <div key={db}
+                    onClick={()=>setPinned((cur)=> (cur && cur.which===which && cur.tb===tb && cur.db===db) ? null : {which,tb,db})}
+                    style={{
+                      height:78,borderRadius:8,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:2,
+                      background, color:textColor,
+                      border: isPinned? '2px solid var(--ce-vert-tres-fonce)' : '1px solid #eef4f2',
+                      cursor:'pointer', transition:'border .1s',
+                    }}>
+                    <span style={{fontSize:'1rem',fontWeight:700}}>{fmtNum(cell.value)}</span>
+                    {deltaInfo && (
+                      <span style={{fontSize:'.66rem',fontWeight:700,padding:'1px 6px',borderRadius:10,background:'rgba(255,255,255,0.88)',color:deltaInfo.color}}>
+                        {deltaInfo.delta>=0?'+':''}{fmtNum(deltaInfo.delta)}
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
+            </React.Fragment>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  const pinnedGridMembers = (pinned && gridsByKey[pinned.which])
+    ? gridsByKey[pinned.which].cells[pinned.tb+'|'+pinned.db].members : null;
+
+  return (
+    <div className="ce-card">
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:10,marginBottom:14}}>
+        <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700}}>Impact des actions stratégiques</h2>
+        <div style={{display:'flex',alignItems:'flex-end',gap:14,flexWrap:'wrap'}}>
+          <CompareCheckboxes checked={compareState} onChange={setCompare} hasBase={hasCompareBase} />
+          <div style={{display:'flex',flexDirection:'column',gap:4}}>
+            <label style={{fontSize:'.66rem',fontWeight:700,color:'var(--ce-vert-fonce)',textTransform:'uppercase'}}>Échéance Cible</label>
+            <select className="ce-select" value={echeanceCible} onChange={(e)=>{ setEcheanceCible(Number(e.target.value)); setPinned(null); }}>
+              {echeanceOptions.map((y)=><option key={y} value={y}>{y}</option>)}
+            </select>
+          </div>
+        </div>
+      </div>
+
+      {!hasGainsGrid && (
+        <div style={{background:'var(--ce-saumon)',borderRadius:8,padding:'8px 12px',fontSize:'.72rem',color:'var(--ce-vert-tres-fonce)',marginBottom:12}}>
+          Grille de gains DPE (onglet « Référentiel des gains DPE ») introuvable dans ce fichier : le DPE Global
+          Actuel/Cible ne peut pas être projeté (distribution figée sur l'état importé).
+        </div>
+      )}
+
+      {impactCounters && <ImpactCountersRow counters={impactCounters} />}
+
+      {(()=>{
+        const titles = { base:'Base'+(baseImport? ' — '+baseImport.nom:''), actuel:'Actuel ('+cutoffActuel+')', cible:'Cible ('+echeanceCible+')' };
+        const visible = [];
+        if (compareState.base && base) visible.push('base');
+        if (compareState.actuel) visible.push('actuel');
+        if (compareState.cible) visible.push('cible');
+        // 3 grilles côte à côte débordent/se chevauchent à l'écran (chaque grille a besoin d'assez de
+        // largeur pour ses 3 colonnes) : quand les 3 sont cochées, Cible passe sur sa propre rangée en
+        // dessous plutôt que de forcer un flex-wrap qui coupe la 3ème grille au milieu.
+        if (visible.length===3){
+          return (
+            <React.Fragment>
+              <div style={{display:'flex',gap:24,flexWrap:'wrap',marginBottom:14}}>
+                {renderGrid('base', titles.base)}
+                {renderGrid('actuel', titles.actuel)}
+              </div>
+              <div style={{display:'flex',gap:24,flexWrap:'wrap',marginBottom:14}}>
+                {renderGrid('cible', titles.cible)}
+              </div>
+            </React.Fragment>
+          );
+        }
+        return (
+          <div style={{display:'flex',gap:24,flexWrap:'wrap',marginBottom:14}}>
+            {visible.map((which)=>renderGrid(which, titles[which]))}
+          </div>
+        );
+      })()}
+
+      <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:14}}>
+        <div className="ce-card" style={{flex:1,minWidth:220,cursor:'pointer',border: (pinned && pinned.which==='parcATraiter') ? '2px solid var(--ce-corail)' : '1px solid #eef4f2'}}
+          onClick={()=>setPinned((cur)=> (cur && cur.which==='parcATraiter') ? null : {which:'parcATraiter'})}>
+          <div style={{fontSize:'.68rem',fontWeight:700,color:'var(--ce-vert-fonce)',textTransform:'uppercase',letterSpacing:'.03em',marginBottom:6}}>Parc à traiter dans le prochain PSP</div>
+          <div style={{fontSize:'1.5rem',fontWeight:700,color:'var(--ce-corail)'}}>{fmtNum(parcATraiterLgt)} lgt</div>
+          <div style={{fontSize:'.72rem',color:'var(--ce-vert-fonce)'}}>{parcATraiterRes.length} résidence{parcATraiterRes.length>1?'s':''} — état technique &lt; 50 ou DPE Global Performant -, à l'échéance Cible {echeanceCible}</div>
+        </div>
+        {nonProjetees.length>0 && (
+          <div className="ce-card" style={{flex:1,minWidth:220,cursor:'pointer',border: (pinned && pinned.which==='nonProjetees') ? '2px solid var(--ce-vert-fonce)' : '1px solid #eef4f2'}}
+            onClick={()=>setPinned((cur)=> (cur && cur.which==='nonProjetees') ? null : {which:'nonProjetees'})}>
+            <div style={{fontSize:'.68rem',fontWeight:700,color:'var(--ce-vert-fonce)',textTransform:'uppercase',letterSpacing:'.03em',marginBottom:6}}>Résidences non projetées</div>
+            <div style={{fontSize:'1.5rem',fontWeight:700,color:'var(--ce-vert-fonce)'}}>{nonProjetees.length}</div>
+            <div style={{fontSize:'.72rem',color:'var(--ce-vert-fonce)'}}>Détail des 5 sous-critères ou distribution DPE indisponible — valeur brute conservée dans la grille Cible.</div>
+          </div>
+        )}
+        {cumulNeuf>0 && (
+          <div className="ce-card" style={{flex:1,minWidth:220}}>
+            <div style={{fontSize:'.68rem',fontWeight:700,color:'var(--ce-vert-fonce)',textTransform:'uppercase',letterSpacing:'.03em',marginBottom:6}}>Construction neuve simulée cumulée</div>
+            <div style={{fontSize:'1.5rem',fontWeight:700,color:'var(--ce-vert-principal)'}}>{fmtNum(cumulNeuf)} lgt</div>
+            <div style={{fontSize:'.72rem',color:'var(--ce-vert-fonce)'}}>Classée par hypothèse en Bon état × Performant + (aucune donnée d'état propre pour du neuf simulé).</div>
+          </div>
+        )}
+      </div>
+
+      {pinned && (
+        <div style={{border:'1px solid #eef4f2',borderRadius:8,padding:'10px 14px',maxHeight:280,overflowY:'auto',marginBottom:12}}>
+          {pinned.which==='parcATraiter' && (parcATraiterRes.length===0 ? <div style={{fontSize:'.76rem',color:'#9fb3ae'}}>Aucune résidence.</div> : parcATraiterRes.map((r)=>residenceRow(r, 'cible')))}
+          {pinned.which==='nonProjetees' && nonProjetees.map((r)=>residenceRow(r, 'cible'))}
+          {gridsByKey[pinned.which] && (()=>{
+            const k = pinned.tb+'|'+pinned.db;
+            const curCell = gridsByKey[pinned.which].cells[k];
+            const refCell = base ? base.cells[k] : null; // référence pour l'évolution, seulement si Base existe
+            const showDeltaHere = pinned.which!=='base' && !!refCell;
+            // Totaux Réhab./RC/Démol./Vente de la famille sélectionnée (nb de logements), affichés ici
+            // à côté du nom de la famille — pas dans la cellule de la grille (trop dense, cf. retour).
+            const familyCounters = cellCounters(pinnedGridMembers, operations, includeIdentifiees);
+            const travauxParts = [
+              dataAvailability.rehab && ('Réhab '+fmtNum(familyCounters.rehab)),
+              dataAvailability.rc && ('RC '+fmtNum(familyCounters.rc)),
+              dataAvailability.demolition && ('Démol '+fmtNum(familyCounters.demolition)),
+              dataAvailability.vente && ('Vente '+fmtNum(familyCounters.vente)),
+            ].filter(Boolean);
+            return (
+              <React.Fragment>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8,marginBottom:4}}>
+                  <div style={{fontSize:'.78rem',fontWeight:700,color:'var(--ce-vert-tres-fonce)'}}>
+                    {pinned.tb} × {pinned.db} ({IMPACT_GRID_LABELS[pinned.which]}) — {pinnedGridMembers.length} résidence{pinnedGridMembers.length>1?'s':''}
+                  </div>
+                  <button className="ce-btn-outline ce-btn-sm" onClick={()=>setShowDpeBreakdown((v)=>!v)}>{showDpeBreakdown? 'Masquer répartition DPE' : 'Répartition DPE'}</button>
+                </div>
+                {travauxParts.length>0 && (
+                  <div style={{fontSize:'.72rem',color:'var(--ce-vert-fonce)',marginBottom:8}}>{travauxParts.join(' · ')}</div>
+                )}
+                {showDpeBreakdown && (
+                  <div style={{marginBottom:10,padding:'8px 0',borderBottom:'1px solid #f0f5f3'}}>
+                    {[['Énergie','distE'],['GES','distG']].map(([label,dk])=>(
+                      <div key={dk} style={{display:'flex',alignItems:'center',gap:6,marginBottom:6,flexWrap:'wrap'}}>
+                        <span style={{width:56,fontSize:'.68rem',fontWeight:700,color:'var(--ce-vert-fonce)'}}>{label}</span>
+                        {['A','B','C','D','E','F','G'].map((cl)=>{
+                          const cur = (curCell[dk][cl]||0);
+                          const ref = refCell ? (refCell[dk][cl]||0) : 0;
+                          let deltaLabel = null;
+                          if (showDeltaHere){
+                            if (ref>0){ const pct=Math.round((cur-ref)/ref*100); deltaLabel=(pct>=0?'+':'')+pct+'%'; }
+                            else if (cur>0){ deltaLabel='nouveau'; }
+                          }
+                          return (
+                            <span key={cl} style={{display:'flex',flexDirection:'column',alignItems:'center',gap:1}}>
+                              <DpeBadge cl={cl} />
+                              <span style={{fontSize:'.6rem',color: deltaLabel? (deltaLabel.startsWith('-')?'var(--ce-corail)':'var(--ce-vert-principal)') : 'var(--ce-vert-fonce)'}}>
+                                {fmtNum(cur)}{deltaLabel? ' ('+deltaLabel+')' : ''}
+                              </span>
+                            </span>
+                          );
+                        })}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {pinnedGridMembers.length===0 && <div style={{fontSize:'.76rem',color:'#9fb3ae'}}>Aucune résidence.</div>}
+                {pinnedGridMembers.map((r)=>residenceRow(r, pinned.which))}
+              </React.Fragment>
+            );
+          })()}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ViewCotation({residences, onSelectResidence, operations, includeIdentifiees, baseImport, gainsGrid, hasGainsGrid, offreNouvelleLgt}){
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [compareView, setCompareView] = useState('overlay'); // 'overlay' | 'base' | 'actuel'
+  const [compare, setCompare] = useState(defaultCompareState());
   const hasScatterData = residences.some((r)=>r.attractivite!==null && r.technique!==null);
   const hasCompareBase = !!baseImport;
+  const compareState = clampCompareState(compare, hasCompareBase);
 
   const scatterPoints = residences.filter((r)=>r.attractivite!==null && r.technique!==null).map((r)=>({
     x:r.attractivite, y:r.technique, r: Math.max(4,Math.min(22, Math.sqrt(r.nbLgt||1)*1.6)), res:r
   }));
 
-  // Comparaison inline "Base" vs "Actuel" (cf. spec dédiée) : le point "Actuel" utilise l'État
-  // technique projeté selon les opérations simulées (matrice RC/Réha), pas la valeur brute du
-  // fichier — c'est tout l'intérêt de la comparaison. Résidences démolies dans la simulation : exclues
-  // (pas de point à comparer). Résidences sans détail des 5 sous-critères : repli sur la valeur brute.
-  const actuelComparePoints = useMemo(()=>{
-    if (!hasCompareBase) return [];
+  // Actuel/Cible : État technique projeté selon les opérations simulées (matrice RC/Réha), pas la
+  // valeur brute du fichier — c'est tout l'intérêt de la comparaison. Actuel borne les opérations à
+  // anneeCoupureActuel() (ce qui est déjà réalisé) ; Cible prend toute la trajectoire (cf. §2.1 de la
+  // spec — les deux passent par la même fonction de projection, seul le jeu d'opérations en entrée
+  // change, pour ne jamais diverger avant la date de coupure). Résidences démolies dans la simulation :
+  // exclues (pas de point à comparer). Résidences sans détail des 5 sous-critères : repli sur la
+  // valeur brute.
+  function projectTechniquePoints(opsForProjection){
     return residences.filter((r)=>r.attractivite!==null).map((r)=>{
-      const proj = computeTechniqueProjection(r, operations, includeIdentifiees);
+      const proj = computeTechniqueProjection(r, opsForProjection, includeIdentifiees);
       const tech = proj ? (proj.demolished? null : proj.technique) : r.technique;
       return tech!==null && tech!==undefined ? {x:r.attractivite, y:tech, r: Math.max(4,Math.min(22, Math.sqrt(r.nbLgt||1)*1.6)), res:r} : null;
     }).filter(Boolean);
-  }, [residences, operations, includeIdentifiees, hasCompareBase]);
+  }
+  const cutoffActuel = useMemo(()=>anneeCoupureActuel(), []);
+  const actuelComparePoints = useMemo(()=>projectTechniquePoints(filterOpsUntil(operations, cutoffActuel)), [residences, operations, includeIdentifiees, cutoffActuel]);
+  const cibleComparePoints = useMemo(()=>projectTechniquePoints(operations), [residences, operations, includeIdentifiees]);
   const baseComparePoints = useMemo(()=>{
     if (!hasCompareBase) return [];
     return (baseImport.data.residences||[]).filter((r)=>r.attractivite!==null && r.technique!==null).map((r)=>({
@@ -1791,8 +2773,16 @@ function ViewCotation({residences, onSelectResidence, operations, includeIdentif
     }));
   }, [baseImport, hasCompareBase]);
   const avgTech = (pts)=> pts.length? pts.reduce((s,p)=>s+p.y,0)/pts.length : null;
-  const deltaTechnique = hasCompareBase && actuelComparePoints.length && baseComparePoints.length
-    ? avgTech(actuelComparePoints) - avgTech(baseComparePoints) : null;
+  const deltaVsBase = (pts)=> (hasCompareBase && baseComparePoints.length && pts.length) ? avgTech(pts)-avgTech(baseComparePoints) : null;
+  const deltaActuel = deltaVsBase(actuelComparePoints);
+  const deltaCible = deltaVsBase(cibleComparePoints);
+
+  // Séries effectivement affichées sur le nuage, dans l'ordre Base -> Actuel -> Cible (couleurs et
+  // libellés partagés avec CompareCheckboxes, cf. COMPARE_COLORS/COMPARE_LABELS).
+  const compareSeries = [];
+  if (compareState.base && baseComparePoints.length) compareSeries.push({key:'base', label:'Base', data:baseComparePoints});
+  if (compareState.actuel) compareSeries.push({key:'actuel', label:'Actuel', data:actuelComparePoints});
+  if (compareState.cible) compareSeries.push({key:'cible', label:'Cible', data:cibleComparePoints});
 
   const baseCols = [
     {key:'code', label:'Code'},
@@ -1820,59 +2810,41 @@ function ViewCotation({residences, onSelectResidence, operations, includeIdentif
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10,flexWrap:'wrap',gap:8}}>
             <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700}}>Segmentation — Attractivité × État technique</h2>
             <div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
-              {hasCompareBase && (
-                <div style={{display:'flex',gap:6}}>
-                  <button className={compareView==='overlay'?'ce-btn ce-btn-sm':'ce-btn-outline ce-btn-sm'} onClick={()=>setCompareView('overlay')}>Superposé</button>
-                  <button className={compareView==='base'?'ce-btn ce-btn-sm':'ce-btn-outline ce-btn-sm'} onClick={()=>setCompareView('base')}>Base seule</button>
-                  <button className={compareView==='actuel'?'ce-btn ce-btn-sm':'ce-btn-outline ce-btn-sm'} onClick={()=>setCompareView('actuel')}>Actuel seul</button>
-                </div>
-              )}
+              <CompareCheckboxes checked={compareState} onChange={setCompare} hasBase={hasCompareBase} />
               <span style={{fontSize:'.7rem',color:'var(--ce-vert-fonce)'}}>Taille des bulles = nombre de logements</span>
             </div>
           </div>
-          {hasCompareBase && deltaTechnique!==null && (
+          {hasCompareBase && compareState.base && (deltaActuel!==null || deltaCible!==null) && (
             <div style={{fontSize:'.78rem',color:'var(--ce-vert-fonce)',marginBottom:10}}>
-              Δ note technique moyenne du parc : <b style={{color: deltaTechnique>=0?'var(--ce-vert-principal)':'var(--ce-corail)'}}>{deltaTechnique>=0?'+':''}{deltaTechnique.toFixed(1)}</b> (base « {baseImport.nom} » → actuel)
+              Δ note technique moyenne du parc vs base « {baseImport.nom} » :{' '}
+              {compareState.actuel && deltaActuel!==null && (<span>Actuel <b style={{color: deltaActuel>=0?'var(--ce-vert-principal)':'var(--ce-corail)'}}>{deltaActuel>=0?'+':''}{deltaActuel.toFixed(1)}</b></span>)}
+              {compareState.actuel && deltaActuel!==null && compareState.cible && deltaCible!==null && <span> · </span>}
+              {compareState.cible && deltaCible!==null && (<span>Cible <b style={{color: deltaCible>=0?'var(--ce-vert-principal)':'var(--ce-corail)'}}>{deltaCible>=0?'+':''}{deltaCible.toFixed(1)}</b></span>)}
             </div>
           )}
-          {!hasCompareBase ? (
-            <ChartCanvas type="bubble" height={340} data={{
-              datasets:[{
-                label:'Résidences',
-                data: scatterPoints,
-                backgroundColor: scatterPoints.map((p)=> PALETTE[(String(p.res.familleAttract||'').charCodeAt(0)||0)%PALETTE.length]+'cc'),
-              }]
-            }} options={{
-              plugins:{ legend:{display:false},
-                tooltip:{ callbacks:{ label:(ctx)=>{ const r=ctx.raw.res; return (r.nom||r.code)+' — Attract. '+r.x.toFixed(1)+' / Tech. '+r.y.toFixed(1)+' / '+fmtNum(r.nbLgt)+' lgt'; } } }
-              },
-              scales:{ x:{title:{display:true,text:'Attractivité'}}, y:{title:{display:true,text:'État technique'}} },
-              onClick:(evt,elements)=>{ if(elements.length){ const p=scatterPoints[elements[0].index]; onSelectResidence(p.res); } }
-            }} />
-          ) : (
-            <ChartCanvas type="bubble" height={340} data={{
-              datasets:[
-                ...(compareView!=='actuel'? [{ label:'Base — '+baseImport.nom, data: baseComparePoints, backgroundColor:'#9fb3aecc' }] : []),
-                ...(compareView!=='base'? [{ label:'Actuel (projeté)', data: actuelComparePoints, backgroundColor:'#009261cc' }] : []),
-              ]
-            }} options={{
-              plugins:{ legend:{display:true},
-                tooltip:{ callbacks:{ label:(ctx)=>{ const r=ctx.raw.res; return ctx.dataset.label+' — '+(r.nom||r.code)+' — Attract. '+ctx.raw.x.toFixed(1)+' / Tech. '+ctx.raw.y.toFixed(1); } } }
-              },
-              scales:{ x:{title:{display:true,text:'Attractivité'}}, y:{title:{display:true,text:'État technique'}} },
-              onClick:(evt,elements)=>{
-                if (!elements.length) return;
-                const el = elements[0];
-                // seule la série "Actuel" est cliquable pour ouvrir la fiche résidence (les points "Base"
-                // proviennent d'un instantané figé, distinct des opérations actuellement simulées).
-                const isActuelDataset = (compareView==='actuel') || (compareView==='overlay' && el.datasetIndex===1);
-                if (isActuelDataset && actuelComparePoints[el.index]) onSelectResidence(actuelComparePoints[el.index].res);
-              }
-            }} />
-          )}
+          <ChartCanvas type="bubble" height={340} data={{
+            datasets: compareSeries.length ? compareSeries.map((s)=>({ label:s.label, data:s.data, backgroundColor:hexToRgba(COMPARE_COLORS[s.key],0.8) }))
+              : [{ label:'Résidences', data: scatterPoints, backgroundColor: scatterPoints.map((p)=> PALETTE[(String(p.res.familleAttract||'').charCodeAt(0)||0)%PALETTE.length]+'cc') }]
+          }} options={{
+            layout:{ padding:{ top:8 } },
+            plugins:{ legend:{display: compareSeries.length>0},
+              tooltip:{ callbacks:{ label:(ctx)=>{ const r=ctx.raw.res; return (ctx.dataset.label? ctx.dataset.label+' — ':'')+(r.nom||r.code)+' — Attract. '+ctx.raw.x.toFixed(1)+' / Tech. '+ctx.raw.y.toFixed(1)+(compareSeries.length? '' : ' / '+fmtNum(r.nbLgt)+' lgt'); } } }
+            },
+            scales:{ x:{title:{display:true,text:'Attractivité'}}, y:{title:{display:true,text:'État technique'}} },
+            onClick:(evt,elements)=>{
+              if (!elements.length) return;
+              const el = elements[0];
+              // seules les séries Actuel/Cible sont cliquables pour ouvrir la fiche résidence (Base est
+              // un instantané figé, distinct des opérations actuellement simulées).
+              if (!compareSeries.length){ onSelectResidence(scatterPoints[el.index].res); return; }
+              const series = compareSeries[el.datasetIndex];
+              if (series && series.key!=='base' && series.data[el.index]) onSelectResidence(series.data[el.index].res);
+            }
+          }} />
         </div>
       )}
-      <SegmentationGrid residences={residences} onSelectResidence={onSelectResidence} />
+      <SegmentationGrid residences={residences} operations={operations} gainsGrid={gainsGrid} includeIdentifiees={includeIdentifiees} baseImport={baseImport} onSelectResidence={onSelectResidence} />
+      <ImpactActionsStrategiques residences={residences} operations={operations} includeIdentifiees={includeIdentifiees} gainsGrid={gainsGrid} hasGainsGrid={hasGainsGrid} offreNouvelleLgt={offreNouvelleLgt} baseImport={baseImport} onSelectResidence={onSelectResidence} />
       <div className="ce-card">
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
           <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700}}>Table des résidences ({residences.length})</h2>
@@ -1960,6 +2932,11 @@ function computeYearsRange(operations){
   const arr=[]; for (let y=min;y<=max;y++) arr.push(y);
   return arr;
 }
+// Dernière année de la trajectoire ("Cible", cf. §2.1 de la spec) : même périmètre que le graphique
+// Trajectoire d'investissement, jamais recalculé indépendamment — on réutilise computeYearsRange().
+function trajectoryEndYear(operations){
+  return Math.max(...computeYearsRange(operations));
+}
 
 // §9.1 — catégorisation de la colonne brute "Type de travaux" (RC / Réha. / Changement de vecteur /
 // Démolition), utilisée UNIQUEMENT comme filtre dans le tableau des opérations de cette vue — jamais
@@ -1979,9 +2956,9 @@ function typeCategorie(type){
 // (Réhabilitation/RC/Chgt de vecteur/Démolition) déjà utilisées dans le même graphique empilé.
 const BUDGET_LIGNE_COLORS = ['#F8C6BA','#9fb3ae','#B79CED','#FFD16A','#6BC9C0','#E6A4B4'];
 function sumBudgetLignesYear(lignes, y){ return (lignes||[]).reduce((s,l)=>s+(Number((l.valeurs||{})[y])||0),0); }
-function ViewInvestissements({residences, operations, setOperations, includeIdentifiees, setIncludeIdentifiees, budgetLignes, setBudgetLignes, gainsGrid, isModified, onReset, baseImport}){
+function ViewInvestissements({residences, operations, setOperations, includeIdentifiees, setIncludeIdentifiees, budgetLignes, setBudgetLignes, gainsGrid, isModified, onReset, baseImport, onSelectResidence}){
   const [search, setSearch] = useState('');
-  const [compareView, setCompareView] = useState('overlay'); // 'overlay' | 'base' | 'actuel'
+  const [compare, setCompare] = useState(defaultCompareState());
   const [filterNature, setFilterNature] = useState('');
   const [filterTypeCat, setFilterTypeCat] = useState('');
   const [filterStatut, setFilterStatut] = useState('');
@@ -1991,6 +2968,8 @@ function ViewInvestissements({residences, operations, setOperations, includeIden
   const [filterMontantMax, setFilterMontantMax] = useState('');
   const [editingLigneId, setEditingLigneId] = useState(null);
   const [editingLigneName, setEditingLigneName] = useState('');
+  const [onlyEcarts, setOnlyEcarts] = useState(true);
+  const [showDisparues, setShowDisparues] = useState(false);
   const years = useMemo(()=>computeYearsRange(operations), [operations]);
   const resByCode = useMemo(()=>{ const m={}; residences.forEach((r)=>m[r.code]=r); return m; }, [residences]);
 
@@ -2007,15 +2986,74 @@ function ViewInvestissements({residences, operations, setOperations, includeIden
 
   const totalByYear = years.map((y)=> families.reduce((s,f)=>s+(aggregation.agg[f][y]||0),0) + sumBudgetLignesYear(budgetLignes, y));
 
+  // §5.1 — même agrégation par famille que ci-dessus, mais sur les opérations de la Base, pour la
+  // 2ème série de barres empilées atténuées du graphique "Évolution des investissements".
+  const baseAggregation = useMemo(()=>{
+    if (!baseImport) return null;
+    const baseOps = (baseImport.simOperations||[]).filter((o)=> baseImport.includeIdentifiees || o.statut==='programme');
+    const agg = {}; families.forEach((f)=>{ agg[f]={}; years.forEach((y)=>agg[f][y]=0); });
+    baseOps.forEach((o)=>{ if (o.annee===null||!years.includes(o.annee)) return; const f=familyOfType(o.type); if(!agg[f]) agg[f]={}; agg[f][o.annee]=(agg[f][o.annee]||0)+(o.montant||0); });
+    return agg;
+  }, [baseImport, years]);
+
   const hasCompareBase = !!baseImport;
+  const compareState = clampCompareState(compare, hasCompareBase);
   const baseTotalByYear = useMemo(()=>{
     if (!hasCompareBase) return null;
     const baseOps = (baseImport.simOperations||[]).filter((o)=> baseImport.includeIdentifiees || o.statut==='programme');
     return years.map((y)=> baseOps.filter((o)=>o.annee===y).reduce((s,o)=>s+(o.montant||0),0) + sumBudgetLignesYear(baseImport.budgetLignes, y));
   }, [baseImport, years, hasCompareBase]);
-  const sumArr = (arr)=> arr? arr.reduce((a,b)=>a+b,0) : null;
-  const deltaBudget = hasCompareBase ? sumArr(totalByYear) - sumArr(baseTotalByYear) : null;
-  const deltaBudgetPct = hasCompareBase && sumArr(baseTotalByYear)>0 ? (deltaBudget/sumArr(baseTotalByYear)*100) : null;
+  // Actuel : seules les années déjà "réalisées" (<= anneeCoupureActuel()) comptent — les années
+  // futures du plan simulé n'apparaissent que dans Cible (cf. §2.1 de la spec). Cible = la trajectoire
+  // complète telle que déjà calculée ci-dessus (totalByYear), renommée pour la comparaison à 3 états.
+  const cutoffActuel = useMemo(()=>anneeCoupureActuel(), []);
+  // Actuel s'arrête à l'année de coupure (ligne interrompue au-delà, valeur null pour Chart.js plutôt
+  // qu'un 0 qui se lirait à tort comme "aucun investissement prévu") ; Cible seule continue jusqu'à la
+  // fin de la trajectoire — convention reprise telle quelle dans la Trajectoire de décarbonation.
+  const actuelTotalByYear = years.map((y,i)=> y<=cutoffActuel? totalByYear[i] : null);
+  const cibleTotalByYear = totalByYear;
+  const sumArr = (arr)=> arr? arr.reduce((a,b)=>a+(b||0),0) : null;
+  const deltaActuelBudget = hasCompareBase ? sumArr(actuelTotalByYear) - sumArr(baseTotalByYear) : null;
+  const deltaCibleBudget = hasCompareBase ? sumArr(cibleTotalByYear) - sumArr(baseTotalByYear) : null;
+  const deltaActuelBudgetPct = hasCompareBase && sumArr(baseTotalByYear)>0 ? (deltaActuelBudget/sumArr(baseTotalByYear)*100) : null;
+  const deltaCibleBudgetPct = hasCompareBase && sumArr(baseTotalByYear)>0 ? (deltaCibleBudget/sumArr(baseTotalByYear)*100) : null;
+
+  // Bandeau de compteurs §5.2 : Réhab/RC/Démolition uniquement (pas Vente/Offre nouvelle, cf. §4.2),
+  // + "reste à faire" = ce qui appartient encore au plan simulé au-delà de l'année de coupure Actuel
+  // (années > cutoffActuel, dans le même jeu d'opérations que Cible — jamais recalculé indépendamment).
+  const investCounters = useMemo(()=>{
+    if (!hasCompareBase) return null;
+    const baseOps = (baseImport.simOperations||[]).filter((o)=> baseImport.includeIdentifiees || o.statut==='programme');
+    const actuelOpsRealisees = filterOpsUntil(operations, cutoffActuel).filter((o)=> includeIdentifiees || o.statut==='programme');
+    const futureOps = visibleOps.filter((o)=> o.annee!=null && o.annee>cutoffActuel);
+    const fams = ['Réhabilitation','Remplacement de composants','Démolition'];
+    const counters = countByFamily(baseOps, actuelOpsRealisees, residences, fams);
+    fams.forEach((fam)=>{
+      const restant = sumLogementsForFamily(futureOps, fam, resByCode);
+      counters[fam].restant = restant;
+      counters[fam].restantPct = counters[fam].prevu>0 ? Math.round(restant/counters[fam].prevu*100) : null;
+    });
+    return counters;
+  }, [hasCompareBase, baseImport, operations, visibleOps, residences, resByCode, includeIdentifiees, cutoffActuel]);
+
+  // Écarts d'opérations vs Base (§5.3), intégrés directement dans le tableau "Opérations" existant
+  // (colonne "Vs Base" + filtre "uniquement les écarts") plutôt qu'en tableau séparé — appariement par
+  // résidence + nature exacte via la fonction unique matchOperations (cf. §5.4 fiche résidence, même
+  // fonction réutilisée aux deux endroits). Comparaison sur l'ensemble des opérations (pas bornée à
+  // anneeCoupureActuel) : l'objectif est de voir tous les écarts du plan simulé actuel vs Base, y
+  // compris ceux qui portent sur des années futures (un plan qui a glissé dans le temps).
+  const ecartsMatch = useMemo(()=>{
+    if (!hasCompareBase) return null;
+    return matchOperations(operations, baseImport.simOperations||[]);
+  }, [hasCompareBase, operations, baseImport]);
+  const ecartByOpId = useMemo(()=>{
+    const m = {};
+    if (ecartsMatch) ecartsMatch.matched.forEach((mt)=>{ m[mt.actuelOp.id] = mt; });
+    return m;
+  }, [ecartsMatch]);
+  // Les opérations "disparues" (présentes en Base, absentes du plan actuel) n'ont pas de ligne
+  // correspondante dans le tableau Opérations (pas d'id éditable) : listées à part, en dessous.
+  const disparuesRows = ecartsMatch ? ecartsMatch.disparues : [];
 
   const typeOptions = useMemo(()=>{
     const s = new Set(Object.keys(gainsGrid));
@@ -2048,9 +3086,14 @@ function ViewInvestissements({residences, operations, setOperations, includeIden
       if (aMax!==null && (o.annee===null || o.annee>aMax)) return false;
       if (mMin!==null && (o.montant||0)<mMin) return false;
       if (mMax!==null && (o.montant||0)>mMax) return false;
+      if (onlyEcarts && hasCompareBase){
+        const m = ecartByOpId[o.id];
+        const isEcart = !m || (m.deltaAnnees && m.deltaAnnees!==0) || (m.deltaMontant && m.deltaMontant!==0);
+        if (!isEcart) return false;
+      }
       return true;
     }).map((o)=>Object.assign({}, o, {resNom: (resByCode[o.resCode]||{}).nom || o.resCode}));
-  }, [operations, search, filterNature, filterTypeCat, filterStatut, filterAnneeMin, filterAnneeMax, filterMontantMin, filterMontantMax, resByCode]);
+  }, [operations, search, filterNature, filterTypeCat, filterStatut, filterAnneeMin, filterAnneeMax, filterMontantMin, filterMontantMax, resByCode, onlyEcarts, hasCompareBase, ecartByOpId]);
 
   function updateOp(id, patch){ setOperations(operations.map((o)=> o.id===id? Object.assign({},o,patch) : o)); }
   function deleteOp(id){ setOperations(operations.filter((o)=>o.id!==id)); }
@@ -2077,11 +3120,18 @@ function ViewInvestissements({residences, operations, setOperations, includeIden
     setOperations([newOp].concat(operations));
   }
 
+  // Colonnes resserrées : largeurs explicites + mode `dense` du tableau (padding réduit, cf.
+  // ce-table-dense) pour compenser l'ajout de la colonne "Vs Base" sans faire disparaître le contenu
+  // essentiel (nature des travaux, année) qui doit rester lisible sans troncature.
   const opsCols = [
+    {key:'_fiche', label:'', render:(o)=>{
+      const r = resByCode[o.resCode];
+      return <button className="ce-btn-outline ce-btn-sm" disabled={!r} title={r? "Ouvrir la fiche résidence" : ""} onClick={()=>r && onSelectResidence && onSelectResidence(r)}>Fiche</button>;
+    }},
     {key:'resCode', label:'Résidence', render:(o)=>{
       const inList = residences.some((r)=>r.code===o.resCode);
       return (
-        <select className="ce-select" value={o.resCode ?? ''} onChange={(e)=>{
+        <select className="ce-select" style={{width:120}} value={o.resCode ?? ''} onChange={(e)=>{
           // <option value=...> est toujours une chaîne côté DOM, même quand r.code est numérique
           // (cas courant) : sans cette résolution, resCode passait de number à string, ce qui cassait
           // silencieusement le filtrage par filteredCodes.has(resCode) (comparaison stricte) et faisait
@@ -2100,7 +3150,7 @@ function ViewInvestissements({residences, operations, setOperations, includeIden
       const val = o.nature ?? o.type ?? '';
       return (
         <div>
-          <select className="ce-select" value={val} onChange={(e)=>{
+          <select className="ce-select" style={{width:185}} value={val} onChange={(e)=>{
             const nature = e.target.value;
             // Auto-renseigne le Type de travaux brut (RC/Réha./Changement de vecteur/Démolition) à
             // partir de la Nature choisie, avec les mêmes règles de détection que familyOfType() —
@@ -2113,27 +3163,44 @@ function ViewInvestissements({residences, operations, setOperations, includeIden
             <option value="" disabled>— À sélectionner —</option>
             {typeOptions.map((t)=><option key={t} value={t}>{t}</option>)}
           </select>
-          {val && generic && <div style={{fontSize:'.65rem',color:'var(--ce-corail)',marginTop:2}}>type générique importé — gain DPE non calculé</div>}
+          {val && generic && <div style={{fontSize:'.62rem',color:'var(--ce-corail)',marginTop:2}}>type générique — gain DPE non calculé</div>}
         </div>
       );
     }},
-    {key:'type', label:'Type de travaux', render:(o)=><span style={{color:'#9fb3ae'}}>{o.type || 'Non renseigné'}</span>},
+    {key:'type', label:'Type', render:(o)=><span style={{color:'#9fb3ae',fontSize:'.76rem'}}>{o.type || 'N.R.'}</span>},
     {key:'statut', label:'Statut', render:(o)=>(
-      <select className="ce-select" value={o.statut ?? ''} onChange={(e)=>updateOp(o.id,{statut:e.target.value})}>
-        <option value="" disabled>— À sélectionner —</option>
+      <select className="ce-select" style={{width:106}} value={o.statut ?? ''} onChange={(e)=>updateOp(o.id,{statut:e.target.value})}>
+        <option value="" disabled>— —</option>
         <option value="programme">Programmé</option>
         <option value="identifie">Identifié</option>
       </select>
     )},
-    {key:'annee', label:'Année', render:(o)=><input className="ce-input" style={{width:76}} type="number" value={o.annee ?? ''} onChange={(e)=>updateOp(o.id,{annee: e.target.value===''? null: Number(e.target.value)})} />},
-    {key:'anneeFin', label:'Date de fin de travaux', render:(o)=><input className="ce-input" style={{width:76}} type="number" value={o.anneeFin ?? ''} onChange={(e)=>updateOp(o.id,{anneeFin: e.target.value===''? null: Number(e.target.value)})} />},
-    {key:'montant', label:'Coût de revient TTC', render:(o)=><input className="ce-input" style={{width:110}} type="number" value={o.montant ?? ''} onChange={(e)=>updateOp(o.id,{montant: e.target.value===''? null: Number(e.target.value)})} />},
-    {key:'_coutLgt', label:'Coût TTC / logement', render:(o)=> (o.logements>0 && o.montant!==null && o.montant!==undefined) ? fmtEur(o.montant/o.logements) : '—'},
+    {key:'annee', label:'Année', render:(o)=><input className="ce-input" style={{width:72}} type="number" value={o.annee ?? ''} onChange={(e)=>updateOp(o.id,{annee: e.target.value===''? null: Number(e.target.value)})} />},
+    {key:'anneeFin', label:'Fin trav.', render:(o)=><input className="ce-input" style={{width:72}} type="number" value={o.anneeFin ?? ''} onChange={(e)=>updateOp(o.id,{anneeFin: e.target.value===''? null: Number(e.target.value)})} />},
+    {key:'montant', label:'Coût TTC', render:(o)=><input className="ce-input" style={{width:95}} type="number" value={o.montant ?? ''} onChange={(e)=>updateOp(o.id,{montant: e.target.value===''? null: Number(e.target.value)})} />},
+    {key:'_coutLgt', label:'€/lgt', render:(o)=> <span style={{fontSize:'.76rem'}}>{(o.logements>0 && o.montant!==null && o.montant!==undefined) ? fmtEur(o.montant/o.logements) : '—'}</span>},
+  ].concat(hasCompareBase ? [
+    // §5.3 — écart vs Base intégré directement dans le tableau des opérations (colonne dédiée), plutôt
+    // qu'un tableau séparé : chaque ligne reste éditable normalement, cette colonne n'est qu'une lecture.
+    // Contenu volontairement court (détail complet en info-bulle) pour ne pas élargir le tableau.
+    {key:'_ecartBase', label:'Vs Base', render:(o)=>{
+      const m = ecartByOpId[o.id];
+      if (!m) return <span title="Absente de la base" style={{fontSize:'.66rem',fontWeight:700,color:'var(--ce-corail)',background:'#fff1ec',borderRadius:10,padding:'1px 6px',whiteSpace:'nowrap'}}>Nouvelle</span>;
+      const noEcart = (!m.deltaAnnees || m.deltaAnnees===0) && (!m.deltaMontant || m.deltaMontant===0);
+      const title = 'Base : '+(m.baseOp.annee ?? '—')+' · '+fmtEur(m.baseOp.montant);
+      if (noEcart) return <span title={title} style={{fontSize:'.72rem',color:'#9fb3ae'}}>=</span>;
+      const parts = [];
+      if (m.deltaAnnees) parts.push((m.deltaAnnees>=0?'+':'')+m.deltaAnnees+'a');
+      if (m.deltaPct!=null && m.deltaPct!==0) parts.push((m.deltaPct>=0?'+':'')+m.deltaPct.toFixed(0)+'%');
+      return <span title={title} style={{fontSize:'.72rem',fontWeight:700,color:'var(--ce-corail)',whiteSpace:'nowrap'}}>{parts.join(' ')}</span>;
+    }},
+  ] : []).concat([
     {key:'_actions', label:'', render:(o)=><button className="ce-btn-outline ce-btn-sm" onClick={()=>deleteOp(o.id)}>Suppr.</button>},
-  ];
+  ]);
 
   return (
     <div style={{padding:24,display:'flex',flexDirection:'column',gap:20}}>
+      {investCounters && <ImpactCountersRow counters={investCounters} />}
       <div className="ce-card">
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:10,marginBottom:12}}>
           <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700}}>Évolution des investissements ({years[0]}–{years[years.length-1]})</h2>
@@ -2145,41 +3212,68 @@ function ViewInvestissements({residences, operations, setOperations, includeIden
             {isModified && <button className="ce-btn-corail ce-btn-sm" onClick={onReset}>Réinitialiser la simulation</button>}
           </div>
         </div>
-        <ChartCanvas type="bar" height={300} data={{
+        <ChartCanvas type="bar" height={300} plugins={CE_ECART_LABELS_PLUGINS} data={{
           labels: years,
-          datasets: families.map((f)=>({ label:f, data: years.map((y)=>aggregation.agg[f][y]||0), backgroundColor: famColors[f], stack:'s' }))
-            .concat(budgetLignes.map((l,i)=>({ label:l.nom||'Ligne budgétaire', data: years.map((y)=>Number((l.valeurs||{})[y])||0), backgroundColor: BUDGET_LIGNE_COLORS[i%BUDGET_LIGNE_COLORS.length], stack:'s' })))
-        }} options={{ scales:{ x:{stacked:true}, y:{stacked:true, ticks:{callback:(v)=>fmtKEur(v)}} },
-          plugins:{ tooltip:{ callbacks:{ label:(ctx)=> ctx.dataset.label+': '+fmtEur(ctx.raw) } } } }} />
+          // Base d'abord (stack rendu en 1er = barre de gauche dans chaque paire), Actuel ensuite (barre
+          // de droite) — Chart.js positionne les stacks dans l'ordre de 1re apparition des datasets.
+          datasets: (baseAggregation? families.map((f)=>({ label:'Base — '+f, data: years.map((y)=>baseAggregation[f][y]||0), backgroundColor: hexToRgba(famColors[f],0.35), stack:'base' })) : [])
+            .concat(families.map((f)=>({ label:f, data: years.map((y)=>aggregation.agg[f][y]||0), backgroundColor: famColors[f], stack:'actuel' })))
+            .concat(budgetLignes.map((l,i)=>({ label:l.nom||'Ligne budgétaire', data: years.map((y)=>Number((l.valeurs||{})[y])||0), backgroundColor: BUDGET_LIGNE_COLORS[i%BUDGET_LIGNE_COLORS.length], stack:'actuel' })))
+          // §5.1 — 2ème série de barres empilées "Base", mêmes couleurs par famille mais atténuées
+          // (détail par famille conservé, pas une barre grisée uniforme). Légende masquée pour ces
+          // séries (cf. filter du plugin legend ci-dessous) : la teinte pâle suffit à les identifier
+          // comme "Base", pas besoin de dupliquer chaque nom de famille une 2e fois dans la légende.
+        }} options={{
+          layout: baseAggregation? {padding:{bottom:22}} : undefined,
+          scales:{ x:{stacked:true}, y:{stacked:true, ticks:{callback:(v)=>fmtKEur(v)}} },
+          plugins:{
+            tooltip:{ callbacks:{ label:(ctx)=> ctx.dataset.label+': '+fmtEur(ctx.raw) } },
+            // Masque les séries "Base — X" de la légende (déjà représentées par leur teinte pâle sur
+            // les barres, cf. commentaire ci-dessus) — évite de répéter chaque famille deux fois.
+            legend:{ labels:{ filter:(item)=>!item.text.startsWith('Base — ') } },
+            ...(baseAggregation? { ceEcartLabels:{
+              // % d'écart Actuel vs Base par année, dessiné par CE_ECART_LABELS_PLUGIN directement sous
+              // la barre "Actuel" — jamais sous Base. Base occupe maintenant les datasets [0..families.
+              // length-1] (barre de gauche), donc le 1er dataset du stack 'actuel' est à cet index-là.
+              values: years.map((y,i)=> baseTotalByYear[i]>0 ? ((totalByYear[i]-baseTotalByYear[i])/baseTotalByYear[i]*100) : null),
+              datasetIndex: families.length, colorPos:'#FF8364', colorNeg:'#009261', // = --ce-corail / --ce-vert-principal (Canvas n'accepte pas var(--x))
+            } } : {}),
+          },
+        }} />
+        {baseAggregation && (
+          <div style={{fontSize:'.68rem',color:'var(--ce-vert-fonce)',marginTop:4,display:'flex',alignItems:'center',gap:6}}>
+            <span style={{display:'inline-block',width:12,height:12,borderRadius:3,background:hexToRgba(famColors['Réhabilitation'],0.35)}}></span>
+            Teinte pâle = Base « {baseImport.nom} » — % sous chaque barre = écart Actuel vs Base
+          </div>
+        )}
       </div>
 
-      {hasCompareBase && (
-        <div className="ce-card">
-          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10,flexWrap:'wrap',gap:8}}>
-            <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700}}>Comparaison — Base « {baseImport.nom} » vs Actuel</h2>
-            <div style={{display:'flex',gap:6}}>
-              <button className={compareView==='overlay'?'ce-btn ce-btn-sm':'ce-btn-outline ce-btn-sm'} onClick={()=>setCompareView('overlay')}>Superposé</button>
-              <button className={compareView==='base'?'ce-btn ce-btn-sm':'ce-btn-outline ce-btn-sm'} onClick={()=>setCompareView('base')}>Base seule</button>
-              <button className={compareView==='actuel'?'ce-btn ce-btn-sm':'ce-btn-outline ce-btn-sm'} onClick={()=>setCompareView('actuel')}>Actuel seul</button>
-            </div>
-          </div>
-          <div style={{fontSize:'.78rem',color:'var(--ce-vert-fonce)',marginBottom:10}}>
-            Δ budget total : <b style={{color: deltaBudget>=0?'var(--ce-corail)':'var(--ce-vert-principal)'}}>{deltaBudget>=0?'+':''}{fmtEur(deltaBudget)}</b>
-            {deltaBudgetPct!==null && <span> ({deltaBudgetPct>=0?'+':''}{deltaBudgetPct.toFixed(0)}%)</span>}
-          </div>
-          <ChartCanvas type="line" height={260} data={{
-            labels: years,
-            datasets: [
-              // §14.3 — aucune résidence base ne passe les filtres transverses actifs : ne pas
-              // inclure le dataset "Base" plutôt que de le tracer à 0 (une ligne plate à zéro se lit
-              // à tort comme "la base ne prévoyait aucun investissement").
-              ...(compareView!=='actuel' && baseImport.data.residences.length>0? [{ label:'Base — '+baseImport.nom, data: baseTotalByYear, borderColor:'#9fb3ae', backgroundColor:'#9fb3ae', pointRadius:2, tension:.2 }] : []),
-              ...(compareView!=='base'? [{ label:'Actuel', data: totalByYear, borderColor:'#009261', backgroundColor:'#009261', pointRadius:2, tension:.2 }] : []),
-            ]
-          }} options={{ scales:{ y:{ beginAtZero:true, ticks:{callback:(v)=>fmtKEur(v)} } },
-            plugins:{ tooltip:{ callbacks:{ label:(ctx)=> ctx.dataset.label+': '+fmtEur(ctx.raw) } } } }} />
+      <div className="ce-card">
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10,flexWrap:'wrap',gap:8}}>
+          <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700}}>Comparaison — Base / Actuel / Cible</h2>
+          <CompareCheckboxes checked={compareState} onChange={setCompare} hasBase={hasCompareBase} />
         </div>
-      )}
+        {hasCompareBase && (deltaActuelBudget!==null || deltaCibleBudget!==null) && (
+          <div style={{fontSize:'.78rem',color:'var(--ce-vert-fonce)',marginBottom:10}}>
+            Δ budget total vs base « {baseImport.nom} » :{' '}
+            {compareState.actuel && (<span>Actuel <b style={{color: deltaActuelBudget>=0?'var(--ce-corail)':'var(--ce-vert-principal)'}}>{deltaActuelBudget>=0?'+':''}{fmtEur(deltaActuelBudget)}</b>{deltaActuelBudgetPct!==null && <span> ({deltaActuelBudgetPct>=0?'+':''}{deltaActuelBudgetPct.toFixed(0)}%)</span>}</span>)}
+            {compareState.actuel && compareState.cible && <span> · </span>}
+            {compareState.cible && (<span>Cible <b style={{color: deltaCibleBudget>=0?'var(--ce-corail)':'var(--ce-vert-principal)'}}>{deltaCibleBudget>=0?'+':''}{fmtEur(deltaCibleBudget)}</b>{deltaCibleBudgetPct!==null && <span> ({deltaCibleBudgetPct>=0?'+':''}{deltaCibleBudgetPct.toFixed(0)}%)</span>}</span>)}
+          </div>
+        )}
+        <ChartCanvas type="line" height={260} data={{
+          labels: years,
+          datasets: [
+            // §14.3 — aucune résidence base ne passe les filtres transverses actifs : ne pas
+            // inclure le dataset "Base" plutôt que de le tracer à 0 (une ligne plate à zéro se lit
+            // à tort comme "la base ne prévoyait aucun investissement").
+            ...(compareState.base && hasCompareBase && baseImport.data.residences.length>0? [{ label:'Base — '+baseImport.nom, data: baseTotalByYear, borderColor:COMPARE_COLORS.base, backgroundColor:COMPARE_COLORS.base, pointRadius:2, tension:.2 }] : []),
+            ...(compareState.actuel? [{ label:'Actuel', data: actuelTotalByYear, borderColor:COMPARE_COLORS.actuel, backgroundColor:COMPARE_COLORS.actuel, pointRadius:2, tension:.2 }] : []),
+            ...(compareState.cible? [{ label:'Cible', data: cibleTotalByYear, borderColor:COMPARE_COLORS.cible, backgroundColor:COMPARE_COLORS.cible, pointRadius:2, tension:.2 }] : []),
+          ]
+        }} options={{ scales:{ y:{ beginAtZero:true, ticks:{callback:(v)=>fmtKEur(v)} } },
+          plugins:{ tooltip:{ callbacks:{ label:(ctx)=> ctx.dataset.label+': '+fmtEur(ctx.raw) } } } }} />
+      </div>
 
       <div className="ce-card">
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
@@ -2259,8 +3353,30 @@ function ViewInvestissements({residences, operations, setOperations, includeIden
             <input className="ce-input" style={{width:110}} type="number" value={filterMontantMax} onChange={(e)=>setFilterMontantMax(e.target.value)} />
           </div>
           {hasActiveFilters && <button className="ce-btn-outline ce-btn-sm" onClick={resetFilters}>Réinitialiser les filtres</button>}
+          {hasCompareBase && (
+            <label style={{fontSize:'.76rem',color:'var(--ce-vert-fonce)',display:'flex',alignItems:'center',gap:6,cursor:'pointer'}}>
+              <input type="checkbox" checked={onlyEcarts} onChange={(e)=>setOnlyEcarts(e.target.checked)} />
+              Afficher uniquement les écarts vs Base
+            </label>
+          )}
         </div>
-        <SortableTable columns={opsCols} rows={filteredOps} pageSize={15} />
+        <SortableTable columns={opsCols} rows={filteredOps} pageSize={15} dense />
+        {hasCompareBase && disparuesRows.length>0 && (
+          <div style={{marginTop:14,paddingTop:12,borderTop:'1px solid #eef4f2'}}>
+            <button className="ce-btn-outline ce-btn-sm" onClick={()=>setShowDisparues((v)=>!v)}>
+              {showDisparues? 'Masquer':'Afficher'} les {disparuesRows.length} opération{disparuesRows.length>1?'s':''} de la Base non reconduite{disparuesRows.length>1?'s':''}
+            </button>
+            {showDisparues && (
+              <div style={{marginTop:10,display:'flex',flexDirection:'column',gap:4}}>
+                {disparuesRows.map((o)=>(
+                  <div key={o.id} style={{fontSize:'.76rem',color:'#9fb3ae',padding:'4px 0',borderBottom:'1px solid #f0f5f3'}}>
+                    {(resByCode[o.resCode]||{}).nom || o.resCode} — {o.nature||o.type||'Non renseigné'} — {o.annee||'année n.c.'} — {fmtEur(o.montant)} <i>(Base uniquement)</i>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -2275,7 +3391,7 @@ function classRangeAG(lo, hi){
 }
 function ViewDecarbonation({residences, operations, gainsGrid, hasGainsGrid, includeIdentifiees, baseImport}){
   const [metric, setMetric] = useState('energie');
-  const [compareView, setCompareView] = useState('overlay'); // 'overlay' | 'base' | 'actuel'
+  const [compare, setCompare] = useState(defaultCompareState());
   const years = useMemo(()=>computeYearsRange(operations), [operations]);
   const classes = ['A','B','C','D','E','F','G','NR'];
 
@@ -2285,7 +3401,11 @@ function ViewDecarbonation({residences, operations, gainsGrid, hasGainsGrid, inc
   }, [residences, operations, gainsGrid, years, metric, includeIdentifiees, hasGainsGrid]);
 
   const initial = trajectory ? trajectory[years[0]] : null;
-  const final = trajectory ? trajectory[years[years.length-1]] : null;
+  // Année "après travaux" de la carte Répartition DPE avant/après (§10 bis) : librement choisie par
+  // l'utilisateur, contrairement à "Avant" qui reste figé sur years[0] (l'état constaté à l'import).
+  const [repartYear, setRepartYear] = useState(null);
+  useEffect(()=>{ if (years.length && !years.includes(repartYear)) setRepartYear(years[years.length-1]); }, [years]);
+  const final = trajectory && repartYear!==null ? trajectory[repartYear] : null;
   const bestShare = (d)=> d ? ((d.A+d.B+d.C) / Math.max(1, classes.reduce((s,c)=>s+d[c],0)) * 100) : null;
   const rangeShare = (d, lo, hi)=>{
     if (!d) return null;
@@ -2305,6 +3425,8 @@ function ViewDecarbonation({residences, operations, gainsGrid, hasGainsGrid, inc
   const dpeCardShare = trajectory && dpeCardYear!==null ? rangeShare(trajectory[dpeCardYear], dpeCardLo, dpeCardHi) : null;
 
   const hasCompareBase = !!(baseImport && baseImport.data.hasGainsGrid);
+  const compareState = clampCompareState(compare, hasCompareBase);
+  const cutoffActuel = useMemo(()=>anneeCoupureActuel(), []);
   const baseTrajectory = useMemo(()=>{
     if (!hasCompareBase) return null;
     const baseYears = computeYearsRange(baseImport.simOperations||[]);
@@ -2318,9 +3440,27 @@ function ViewDecarbonation({residences, operations, gainsGrid, hasGainsGrid, inc
       return d? bestShare(d) : null;
     });
   }, [baseTrajectory, years]);
-  const actuelShareByYear = trajectory ? years.map((y)=>bestShare(trajectory[y])) : null;
-  const deltaShare = (hasCompareBase && actuelShareByYear && baseShareByYear && baseShareByYear[baseShareByYear.length-1]!==null)
-    ? actuelShareByYear[actuelShareByYear.length-1] - baseShareByYear[baseShareByYear.length-1] : null;
+  // Cible = trajectoire complète (déjà calculée ci-dessus) ; Actuel s'arrête à anneeCoupureActuel()
+  // (ligne interrompue au-delà, cf. convention ViewInvestissements) — les deux dérivent de la même
+  // `trajectory`, jamais recalculées indépendamment (cf. §2.1 de la spec).
+  const cibleShareByYear = trajectory ? years.map((y)=>bestShare(trajectory[y])) : null;
+  const actuelShareByYear = trajectory ? years.map((y,i)=> y<=cutoffActuel? cibleShareByYear[i] : null) : null;
+  // Delta Actuel évalué à l'année de coupure (dernier point réellement tracé par cette série) ; delta
+  // Cible évalué en fin de trajectoire — chacun comparé à la Base à la même année, pas à l'année de fin
+  // de Base qui peut différer.
+  function shareAtYear(arr, year){ if (!arr) return null; const idx = years.indexOf(year); return idx>=0? arr[idx] : null; }
+  function deltaAtYear(arr, year){ const a = shareAtYear(arr, year), b = shareAtYear(baseShareByYear, year); return (hasCompareBase && a!==null && b!==null) ? a-b : null; }
+  const deltaActuelShare = deltaAtYear(actuelShareByYear, cutoffActuel);
+  const deltaCibleShare = deltaAtYear(cibleShareByYear, years[years.length-1]);
+
+  // Carte "Logements classe X-Y" (§10) : en plus de l'année librement choisie ci-dessus, affiche Base
+  // (année de la version base — 1re année de sa propre trajectoire, même convention que "Avant
+  // intervention" = years[0] ci-dessus) et Cible (dernière année du fichier importé) — toutes deux
+  // suivent les mêmes sélecteurs de classe (borne basse/haute), seule l'année reste fixe pour ces deux-là.
+  const baseCardYear = baseTrajectory ? baseTrajectory.years[0] : null;
+  const baseCardShare = baseTrajectory ? rangeShare(baseTrajectory.traj[baseCardYear], dpeCardLo, dpeCardHi) : null;
+  const cibleCardYear = years.length? years[years.length-1] : null;
+  const cibleCardShare = (trajectory && cibleCardYear!==null) ? rangeShare(trajectory[cibleCardYear], dpeCardLo, dpeCardHi) : null;
 
   return (
     <div style={{padding:24,display:'flex',flexDirection:'column',gap:20}}>
@@ -2337,6 +3477,20 @@ function ViewDecarbonation({residences, operations, gainsGrid, hasGainsGrid, inc
                 Logements classe {dpeCardLo}{dpeCardLo!==dpeCardHi?('-'+dpeCardHi):''} en {dpeCardYear??''}
               </div>
               <div style={{fontSize:'1.7rem',fontWeight:700,color:'var(--ce-vert-principal)'}}>{dpeCardShare!==null? dpeCardShare.toFixed(0)+'%':'—'}</div>
+            </div>
+            {hasCompareBase && (
+              <div style={{flex:1,minWidth:150}}>
+                <div style={{fontSize:'.68rem',fontWeight:700,color:'var(--ce-vert-fonce)',textTransform:'uppercase',letterSpacing:'.03em',marginBottom:6}}>
+                  Base{baseCardYear!==null? ' — '+baseCardYear:''}
+                </div>
+                <div style={{fontSize:'1.7rem',fontWeight:700,color:COMPARE_COLORS.base}}>{baseCardShare!==null? baseCardShare.toFixed(0)+'%':'—'}</div>
+              </div>
+            )}
+            <div style={{flex:1,minWidth:150}}>
+              <div style={{fontSize:'.68rem',fontWeight:700,color:'var(--ce-vert-fonce)',textTransform:'uppercase',letterSpacing:'.03em',marginBottom:6}}>
+                Cible{cibleCardYear!==null? ' — '+cibleCardYear:''}
+              </div>
+              <div style={{fontSize:'1.7rem',fontWeight:700,color:COMPARE_COLORS.cible}}>{cibleCardShare!==null? cibleCardShare.toFixed(0)+'%':'—'}</div>
             </div>
             <div style={{display:'flex',flexDirection:'column',gap:4}}>
               <label style={{fontSize:'.66rem',fontWeight:700,color:'var(--ce-vert-fonce)',textTransform:'uppercase'}}>Année</label>
@@ -2380,48 +3534,60 @@ function ViewDecarbonation({residences, operations, gainsGrid, hasGainsGrid, inc
             </p>
           </div>
           <div className="ce-card">
-            <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700,marginBottom:12}}>
-              Répartition des étiquettes DPE {metric==='energie'?'Énergie':'GES'} — avant / après intervention
-            </h2>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:10,marginBottom:12}}>
+              <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700}}>
+                Répartition des étiquettes DPE {metric==='energie'?'Énergie':'GES'} — avant / après intervention
+              </h2>
+              <div style={{display:'flex',flexDirection:'column',gap:4}}>
+                <label style={{fontSize:'.66rem',fontWeight:700,color:'var(--ce-vert-fonce)',textTransform:'uppercase'}}>Année (après travaux)</label>
+                <select className="ce-select" value={repartYear??''} onChange={(e)=>setRepartYear(Number(e.target.value))}>
+                  {years.map((y)=>{
+                    const badge = y===baseCardYear? 'Base' : y===cutoffActuel? 'Actuel' : y===cibleCardYear? 'Cible' : null;
+                    return <option key={y} value={y}>{y}{badge? ' — '+badge:''}</option>;
+                  })}
+                </select>
+              </div>
+            </div>
             <ChartCanvas type="bar" height={300} data={{
-              labels: classes.filter((c)=>(initial[c]||0)>0 || (final[c]||0)>0),
+              // `final` peut être momentanément null le temps que l'effet ci-dessus fixe `repartYear`
+              // au tout premier rendu (même garde que `dpeCardShare` plus haut) : (final||{})[c] évite
+              // un crash "Cannot read properties of null" à ce moment précis.
+              labels: classes.filter((c)=>(initial[c]||0)>0 || ((final||{})[c]||0)>0),
               datasets: [
-                { label:'Avant intervention', data: classes.filter((c)=>(initial[c]||0)>0 || (final[c]||0)>0).map((c)=>initial[c]||0), backgroundColor:'#9fb3ae' },
-                { label:'Après intervention', data: classes.filter((c)=>(initial[c]||0)>0 || (final[c]||0)>0).map((c)=>final[c]||0), backgroundColor: classes.filter((c)=>(initial[c]||0)>0 || (final[c]||0)>0).map((c)=>DPE_COLORS[c]) },
+                { label:'Avant intervention', data: classes.filter((c)=>(initial[c]||0)>0 || ((final||{})[c]||0)>0).map((c)=>initial[c]||0), backgroundColor:'#9fb3ae' },
+                { label:'Après intervention', data: classes.filter((c)=>(initial[c]||0)>0 || ((final||{})[c]||0)>0).map((c)=>(final||{})[c]||0), backgroundColor: classes.filter((c)=>(initial[c]||0)>0 || ((final||{})[c]||0)>0).map((c)=>DPE_COLORS[c]) },
               ]
             }} options={{ scales:{ y:{ title:{display:true,text:'Logements'} } } }} />
             <p style={{fontSize:'.7rem',color:'var(--ce-vert-fonce)',marginTop:10,lineHeight:1.5}}>
-              Avant = distribution DPE constatée en {years[0]}. Après = distribution projetée en {years[years.length-1]} selon
+              Avant = distribution DPE constatée en {years[0]}. Après = distribution projetée en {repartYear} selon
               les opérations actuellement incluses dans la simulation (bascule « Inclure les opérations identifiées » prise en compte).
             </p>
           </div>
-          {hasCompareBase && (
-            <div className="ce-card">
-              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10,flexWrap:'wrap',gap:8}}>
-                <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700}}>Comparaison — Base « {baseImport.nom} » vs Actuel</h2>
-                <div style={{display:'flex',gap:6}}>
-                  <button className={compareView==='overlay'?'ce-btn ce-btn-sm':'ce-btn-outline ce-btn-sm'} onClick={()=>setCompareView('overlay')}>Superposé</button>
-                  <button className={compareView==='base'?'ce-btn ce-btn-sm':'ce-btn-outline ce-btn-sm'} onClick={()=>setCompareView('base')}>Base seule</button>
-                  <button className={compareView==='actuel'?'ce-btn ce-btn-sm':'ce-btn-outline ce-btn-sm'} onClick={()=>setCompareView('actuel')}>Actuel seul</button>
-                </div>
-              </div>
-              {deltaShare!==null && (
-                <div style={{fontSize:'.78rem',color:'var(--ce-vert-fonce)',marginBottom:10}}>
-                  Δ logements classe A-C en fin de trajectoire : <b style={{color: deltaShare>=0?'var(--ce-vert-principal)':'var(--ce-corail)'}}>{deltaShare>=0?'+':''}{deltaShare.toFixed(0)} pts</b>
-                </div>
-              )}
-              <ChartCanvas type="line" height={260} data={{
-                labels: years,
-                datasets: [
-                  // §14.3 — cf. commentaire équivalent dans ViewInvestissements : aucune résidence
-                  // base ne passe les filtres transverses actifs → omettre le dataset plutôt qu'une
-                  // ligne plate à 0%, trompeuse.
-                  ...(compareView!=='actuel' && baseImport.data.residences.length>0? [{ label:'Base — '+baseImport.nom, data: baseShareByYear, borderColor:'#9fb3ae', backgroundColor:'#9fb3ae', pointRadius:2, tension:.2 }] : []),
-                  ...(compareView!=='base'? [{ label:'Actuel', data: actuelShareByYear, borderColor:'#009261', backgroundColor:'#009261', pointRadius:2, tension:.2 }] : []),
-                ]
-              }} options={{ scales:{ y:{ beginAtZero:true, max:100, title:{display:true,text:'% logements classe A-C'} } } }} />
+          <div className="ce-card">
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10,flexWrap:'wrap',gap:8}}>
+              <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700}}>Comparaison — Base / Actuel / Cible</h2>
+              <CompareCheckboxes checked={compareState} onChange={setCompare} hasBase={hasCompareBase} />
             </div>
-          )}
+            {(deltaActuelShare!==null || deltaCibleShare!==null) && (
+              <div style={{fontSize:'.78rem',color:'var(--ce-vert-fonce)',marginBottom:10}}>
+                Δ logements classe A-C vs base « {baseImport && baseImport.nom} » :{' '}
+                {compareState.actuel && deltaActuelShare!==null && (<span>Actuel ({cutoffActuel}) <b style={{color: deltaActuelShare>=0?'var(--ce-vert-principal)':'var(--ce-corail)'}}>{deltaActuelShare>=0?'+':''}{deltaActuelShare.toFixed(0)} pts</b></span>)}
+                {compareState.actuel && deltaActuelShare!==null && compareState.cible && deltaCibleShare!==null && <span> · </span>}
+                {compareState.cible && deltaCibleShare!==null && (<span>Cible ({years[years.length-1]}) <b style={{color: deltaCibleShare>=0?'var(--ce-vert-principal)':'var(--ce-corail)'}}>{deltaCibleShare>=0?'+':''}{deltaCibleShare.toFixed(0)} pts</b></span>)}
+              </div>
+            )}
+            <ChartCanvas type="line" height={260} data={{
+              labels: years,
+              datasets: [
+                // §14.3 — cf. commentaire équivalent dans ViewInvestissements : aucune résidence
+                // base ne passe les filtres transverses actifs → omettre le dataset plutôt qu'une
+                // ligne plate à 0%, trompeuse.
+                ...(compareState.base && hasCompareBase && baseImport.data.residences.length>0? [{ label:'Base — '+baseImport.nom, data: baseShareByYear, borderColor:COMPARE_COLORS.base, backgroundColor:COMPARE_COLORS.base, pointRadius:2, tension:.2 }] : []),
+                ...(compareState.actuel? [{ label:'Actuel', data: actuelShareByYear, borderColor:COMPARE_COLORS.actuel, backgroundColor:COMPARE_COLORS.actuel, pointRadius:2, tension:.2 }] : []),
+                ...(compareState.cible? [{ label:'Cible', data: cibleShareByYear, borderColor:COMPARE_COLORS.cible, backgroundColor:COMPARE_COLORS.cible, pointRadius:2, tension:.2 }] : []),
+              ]
+            }} options={{ scales:{ y:{ beginAtZero:true, max:100, title:{display:true,text:'% logements classe A-C'} } } }} />
+          </div>
         </React.Fragment>
       )}
     </div>
@@ -2447,8 +3613,50 @@ function deriveConventionne(r){
   if (r.dontFoyer>0) return 'Foyer / résidence sociale';
   return '—';
 }
-function ViewOffreVente({residences, operations, offreNouvelleLgt, setOffreNouvelleLgt, ventesSimulees, setVentesSimulees}){
+// §6 — scission de l'ancienne vue "Offre nouvelle & Vente" en deux onglets distincts (Orientations
+// stratégiques), sans changement de logique ni de calcul : ViewOffreNouvelle reprend la carte de
+// simulation manuelle, ViewVente les deux cartes de ventes (simulées + résidences déjà en plan de
+// vente). Les deux parties ne partageaient déjà aucun state ni logique croisée.
+function ViewOffreNouvelle({residences, operations, offreNouvelleLgt, setOffreNouvelleLgt}){
   const years = useMemo(()=>computeYearsRange(operations), [operations]);
+  const annualValues = years.map((y)=>Number(offreNouvelleLgt[y])||0);
+  const cumulative = useMemo(()=>{
+    let cum = 0;
+    return years.map((y)=>{ cum += Number(offreNouvelleLgt[y])||0; return cum; });
+  }, [years, offreNouvelleLgt]);
+
+  return (
+    <div style={{padding:24,display:'flex',flexDirection:'column',gap:20}}>
+      <div className="ce-card">
+        <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700,marginBottom:12}}>Offre nouvelle — simulation manuelle</h2>
+        <p style={{fontSize:'.72rem',color:'var(--ce-vert-fonce)',marginBottom:14,lineHeight:1.5}}>
+          Aucun onglet du fichier importé ne recense l'offre nouvelle (construction neuve) : cette section permet
+          de saisir manuellement, année par année, le nombre de logements neufs simulés — à titre indicatif,
+          en complément de la Base de cotation.
+        </p>
+        <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:16}}>
+          {years.map((y)=>(
+            <div key={y} style={{display:'flex',flexDirection:'column',gap:3}}>
+              <label style={{fontSize:'.68rem',color:'var(--ce-vert-fonce)'}}>{y}</label>
+              <input className="ce-input" style={{width:92}} type="number" value={offreNouvelleLgt[y]||''}
+                placeholder="0"
+                onChange={(e)=>setOffreNouvelleLgt(Object.assign({},offreNouvelleLgt,{[y]: e.target.value===''? undefined : Number(e.target.value)}))} />
+            </div>
+          ))}
+        </div>
+        <ChartCanvas type="bar" height={260} data={{
+          labels: years,
+          datasets: [
+            { type:'bar', label:'Logements neufs simulés (par année)', data: annualValues, backgroundColor:'#58D88B', borderRadius:4 },
+            { type:'line', label:'Cumul de logements neufs', data: cumulative, borderColor:'#009261', backgroundColor:'#009261', pointRadius:3, fill:false, yAxisID:'y1' },
+          ]
+        }} options={{ scales:{ y:{ beginAtZero:true, title:{display:true,text:'Logements (année)'} }, y1:{ beginAtZero:true, position:'right', grid:{drawOnChartArea:false}, title:{display:true,text:'Cumul'} } } }} />
+      </div>
+    </div>
+  );
+}
+
+function ViewVente({residences, ventesSimulees, setVentesSimulees}){
   const resByCode = useMemo(()=>{ const m={}; residences.forEach((r)=>m[r.code]=r); return m; }, [residences]);
   const typeVenteSuggestions = useMemo(()=>uniqueSorted(residences.map((r)=>r.typeVente)), [residences]);
 
@@ -2520,40 +3728,8 @@ function ViewOffreVente({residences, operations, offreNouvelleLgt, setOffreNouve
     {key:'montantVenteM2', label:'Montant au m²', render:(r)=>r.montantVenteM2!==null? fmtEur(r.montantVenteM2):'—'},
   ];
 
-  const annualValues = years.map((y)=>Number(offreNouvelleLgt[y])||0);
-  const cumulative = useMemo(()=>{
-    let cum = 0;
-    return years.map((y)=>{ cum += Number(offreNouvelleLgt[y])||0; return cum; });
-  }, [years, offreNouvelleLgt]);
-
   return (
     <div style={{padding:24,display:'flex',flexDirection:'column',gap:20}}>
-      <div className="ce-card">
-        <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700,marginBottom:12}}>Offre nouvelle — simulation manuelle</h2>
-        <p style={{fontSize:'.72rem',color:'var(--ce-vert-fonce)',marginBottom:14,lineHeight:1.5}}>
-          Aucun onglet du fichier importé ne recense l'offre nouvelle (construction neuve) : cette section permet
-          de saisir manuellement, année par année, le nombre de logements neufs simulés — à titre indicatif,
-          en complément de la Base de cotation.
-        </p>
-        <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:16}}>
-          {years.map((y)=>(
-            <div key={y} style={{display:'flex',flexDirection:'column',gap:3}}>
-              <label style={{fontSize:'.68rem',color:'var(--ce-vert-fonce)'}}>{y}</label>
-              <input className="ce-input" style={{width:92}} type="number" value={offreNouvelleLgt[y]||''}
-                placeholder="0"
-                onChange={(e)=>setOffreNouvelleLgt(Object.assign({},offreNouvelleLgt,{[y]: e.target.value===''? undefined : Number(e.target.value)}))} />
-            </div>
-          ))}
-        </div>
-        <ChartCanvas type="bar" height={260} data={{
-          labels: years,
-          datasets: [
-            { type:'bar', label:'Logements neufs simulés (par année)', data: annualValues, backgroundColor:'#58D88B', borderRadius:4 },
-            { type:'line', label:'Cumul de logements neufs', data: cumulative, borderColor:'#009261', backgroundColor:'#009261', pointRadius:3, fill:false, yAxisID:'y1' },
-          ]
-        }} options={{ scales:{ y:{ beginAtZero:true, title:{display:true,text:'Logements (année)'} }, y1:{ beginAtZero:true, position:'right', grid:{drawOnChartArea:false}, title:{display:true,text:'Cumul'} } } }} />
-      </div>
-
       <div className="ce-card">
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:10,marginBottom:12}}>
           <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700}}>Ventes simulées ({ventesSimulees.length})</h2>
@@ -3217,7 +4393,7 @@ function ViewComparatif({currentSnapshot}){
 }
 
 /* ---------------- Fiche résidence (drill-down) ---------------- */
-function ResidenceDrawer({residence, operations, residences, onClose, gainsGrid, hasGainsGrid, includeIdentifiees}){
+function ResidenceDrawer({residence, operations, residences, onClose, gainsGrid, hasGainsGrid, includeIdentifiees, baseImport}){
   const [tab, setTab] = useState('synthese');
   // Les hooks doivent s'exécuter à chaque rendu dans le même ordre : le "return null" pour
   // l'absence de résidence sélectionnée doit donc venir APRÈS tous les hooks, jamais avant
@@ -3248,6 +4424,27 @@ function ResidenceDrawer({residence, operations, residences, onClose, gainsGrid,
   const identifiees = ops.filter((o)=>o.statut==='identifie');
   const identifieesTop4 = identifiees.slice(0,4);
   const critereGroups = residence.critereGroups || {};
+
+  // §5.4 — comparaison Base des actions de cette résidence, même fonction d'appariement matchOperations
+  // que la table des écarts d'"Investissements & Entretien du parc" (§5.3), jamais une 2e implémentation.
+  const baseOpsForResidence = baseImport ? (baseImport.simOperations||[]).filter((o)=>o.resCode===residence.code) : [];
+  const ecartsResidence = baseImport ? matchOperations(ops, baseOpsForResidence) : null;
+  const baseMatchByActuelId = {};
+  if (ecartsResidence) ecartsResidence.matched.forEach((m)=>{ baseMatchByActuelId[m.actuelOp.id] = m; });
+  const disparuesResidence = ecartsResidence ? ecartsResidence.disparues : [];
+  function baseAnnotation(o){
+    if (!baseImport) return null;
+    const m = baseMatchByActuelId[o.id];
+    if (m){
+      if ((!m.deltaAnnees || m.deltaAnnees===0) && (!m.deltaMontant || m.deltaMontant===0)) return null; // identique à la base, rien à signaler
+      return (
+        <div style={{marginTop:4,fontSize:'.7rem',color:'var(--ce-corail)',background:'#fff1ec',display:'inline-block',borderRadius:8,padding:'2px 8px'}}>
+          Base : {fmtEur(m.baseOp.montant)} en {m.baseOp.annee ?? '—'}{m.deltaAnnees? ' ('+(m.deltaAnnees>=0?'+':'')+m.deltaAnnees+' an'+(Math.abs(m.deltaAnnees)>1?'s':'')+')':''}
+        </div>
+      );
+    }
+    return <div style={{marginTop:4,fontSize:'.7rem',color:'var(--ce-corail)',fontStyle:'italic'}}>Nouvelle opération (absente de la base)</div>;
+  }
 
   const byYear = {};
   ops.forEach((o)=>{ const y=o.annee||'?'; byYear[y]=(byYear[y]||0)+(o.montant||0); });
@@ -3391,6 +4588,7 @@ function ResidenceDrawer({residence, operations, residences, onClose, gainsGrid,
                 {programmees.map((o)=>(<div key={o.id} className="ce-card" style={{marginBottom:8,borderLeft:'4px solid var(--ce-vert-principal)'}}>
                   <b>{o.nature || o.type || 'Non renseigné'}</b> — {o.annee||'année n.c.'}{o.anneeFin? ' → '+o.anneeFin:''} — {fmtEur(o.montant)}
                   {o.logements>0 && o.montant!==null && o.montant!==undefined && <span style={{color:'#9fb3ae'}}> ({fmtEur(o.montant/o.logements)}/lgt)</span>}
+                  {baseAnnotation(o)}
                 </div>))}
                 {programmees.length===0 && <div style={{fontSize:'.78rem',color:'#9fb3ae'}}>Aucune.</div>}
               </div>
@@ -3399,9 +4597,18 @@ function ResidenceDrawer({residence, operations, residences, onClose, gainsGrid,
                 {identifiees.map((o)=>(<div key={o.id} className="ce-card" style={{marginBottom:8,borderLeft:'4px solid var(--ce-corail)'}}>
                   <b>{o.nature || o.type || 'Non renseigné'}</b> — {o.annee||'année n.c.'}{o.anneeFin? ' → '+o.anneeFin:''} — {fmtEur(o.montant)}
                   {o.logements>0 && o.montant!==null && o.montant!==undefined && <span style={{color:'#9fb3ae'}}> ({fmtEur(o.montant/o.logements)}/lgt)</span>}
+                  {baseAnnotation(o)}
                 </div>))}
                 {identifiees.length===0 && <div style={{fontSize:'.78rem',color:'#9fb3ae'}}>Aucune.</div>}
               </div>
+              {baseImport && disparuesResidence.length>0 && (
+                <div>
+                  <h3 style={{fontSize:'.8rem',fontWeight:700,marginBottom:8,color:'#9fb3ae'}}>Disparues / non reconduites vs Base ({disparuesResidence.length})</h3>
+                  {disparuesResidence.map((o)=>(<div key={o.id} className="ce-card" style={{marginBottom:8,borderLeft:'4px solid #9fb3ae'}}>
+                    <b>{o.nature || o.type || 'Non renseigné'}</b> — {o.annee||'année n.c.'} — {fmtEur(o.montant)} <span style={{color:'#9fb3ae'}}>(Base uniquement)</span>
+                  </div>))}
+                </div>
+              )}
               {dpeHorizon && (
                 <div className="ce-card">
                   <h3 style={{fontSize:'.8rem',fontWeight:700,marginBottom:10}}>Projection DPE à 10 ans ({dpeHorizon.startYear} → {dpeHorizon.endYear})</h3>
@@ -3614,7 +4821,7 @@ function App(){
 
       <div style={{flex:1}}>
         {activeTab==='ensemble' && <ViewEnsemble residences={filteredResidences} operations={filteredOperations} />}
-        {activeTab==='cotation' && <ViewCotation residences={filteredResidences} onSelectResidence={setSelectedResidence} operations={filteredOperations} includeIdentifiees={includeIdentifiees} baseImport={baseImportFiltered} />}
+        {activeTab==='cotation' && <ViewCotation residences={filteredResidences} onSelectResidence={setSelectedResidence} operations={filteredOperations} includeIdentifiees={includeIdentifiees} baseImport={baseImportFiltered} gainsGrid={data.gainsGrid} hasGainsGrid={data.hasGainsGrid} offreNouvelleLgt={offreNouvelleLgt} />}
         {activeTab==='invest' && (
           <ViewInvestissements
             residences={filteredResidences}
@@ -3631,16 +4838,22 @@ function App(){
             isModified={dirty}
             onReset={resetSimulation}
             baseImport={baseImportFiltered}
+            onSelectResidence={setSelectedResidence}
           />
         )}
         {activeTab==='dpe' && <ViewDecarbonation residences={filteredResidences} operations={filteredOperations} gainsGrid={data.gainsGrid} hasGainsGrid={data.hasGainsGrid} includeIdentifiees={includeIdentifiees} baseImport={baseImportFiltered} />}
         {activeTab==='finance' && <ViewFinance residences={filteredResidences} onSelectResidence={setSelectedResidence} />}
-        {activeTab==='offre_vente' && (
-          <ViewOffreVente
+        {activeTab==='offre' && (
+          <ViewOffreNouvelle
             residences={filteredResidences}
             operations={filteredOperations}
             offreNouvelleLgt={offreNouvelleLgt}
             setOffreNouvelleLgt={setOffreNouvelleLgt}
+          />
+        )}
+        {activeTab==='vente' && (
+          <ViewVente
+            residences={filteredResidences}
             ventesSimulees={ventesSimulees.filter((v)=>v.resCode===null || filteredCodes.has(v.resCode))}
             setVentesSimulees={(next)=>{
               const otherCodesVentes = ventesSimulees.filter((v)=>v.resCode!==null && !filteredCodes.has(v.resCode));
@@ -3660,7 +4873,7 @@ function App(){
       </div>
 
       <div className="ce-footer">cellance — Document confidentiel — Traitement 100% local ; seule exception : l'onglet Cartographie transmet les adresses des résidences à l'API publique api-adresse.data.gouv.fr pour les géolocaliser</div>
-      <ResidenceDrawer residence={selectedResidence} operations={simOperations} residences={filteredResidences} onClose={()=>setSelectedResidence(null)} gainsGrid={data.gainsGrid} hasGainsGrid={data.hasGainsGrid} includeIdentifiees={includeIdentifiees} />
+      <ResidenceDrawer residence={selectedResidence} operations={simOperations} residences={filteredResidences} onClose={()=>setSelectedResidence(null)} gainsGrid={data.gainsGrid} hasGainsGrid={data.hasGainsGrid} includeIdentifiees={includeIdentifiees} baseImport={baseImportFiltered} />
     </div>
   );
 }

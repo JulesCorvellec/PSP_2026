@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "map-preview",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["C:\\Users\\JULESC~1\\AppData\\Local\\Temp\\claude\\C--Users-JulesCorvellec-Cellance-Missions---Documents----Transverse-09-Politique-de-l-habitat---CUS-et-PSP-MAH-PSP-PSP-IA-GitHub-PSP-2026\\4c4b671b-040b-48a6-a363-6191da8cf49c\\scratchpad\\cors_server.js", "5175"],
+      "port": 5175
+    },
+    {
+      "name": "psp-app",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["--yes", "serve", "-l", "5176", "."],
+      "port": 5176
+    }
+  ]
+}
