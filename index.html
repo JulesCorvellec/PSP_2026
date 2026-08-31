@@ -2826,11 +2826,11 @@ function ViewCotation({residences, onSelectResidence, operations, includeIdentif
             datasets: compareSeries.length ? compareSeries.map((s)=>({ label:s.label, data:s.data, backgroundColor:hexToRgba(COMPARE_COLORS[s.key],0.8) }))
               : [{ label:'Résidences', data: scatterPoints, backgroundColor: scatterPoints.map((p)=> PALETTE[(String(p.res.familleAttract||'').charCodeAt(0)||0)%PALETTE.length]+'cc') }]
           }} options={{
-            layout:{ padding:{ top:8 } },
-            plugins:{ legend:{display: compareSeries.length>0},
+            layout:{ padding:{ top:24 } },
+            plugins:{ legend:{display: compareSeries.length>0, labels:{boxHeight:8}},
               tooltip:{ callbacks:{ label:(ctx)=>{ const r=ctx.raw.res; return (ctx.dataset.label? ctx.dataset.label+' — ':'')+(r.nom||r.code)+' — Attract. '+ctx.raw.x.toFixed(1)+' / Tech. '+ctx.raw.y.toFixed(1)+(compareSeries.length? '' : ' / '+fmtNum(r.nbLgt)+' lgt'); } } }
             },
-            scales:{ x:{title:{display:true,text:'Attractivité'}}, y:{title:{display:true,text:'État technique'}} },
+            scales:{ x:{title:{display:true,text:'Attractivité'}}, y:{title:{display:true,text:'État technique'}, suggestedMax:108} },
             onClick:(evt,elements)=>{
               if (!elements.length) return;
               const el = elements[0];
