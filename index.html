@@ -13,6 +13,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.22.20/babel.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <style>
@@ -833,67 +834,45 @@ function useGeocoding(residences){
   return {coords, progress, status};
 }
 
-/* ---------------- Sauvegarde locale des imports (IndexedDB) ----------------
-   Wrapper minimal en IndexedDB natif (pas de librairie externe) : les imports complets (données +
-   simulation en cours) peuvent atteindre plusieurs Mo, largement au-delà des ~5-10 Mo de quota
-   généralement disponibles pour localStorage — IndexedDB n'a pas cette limitation pratique.
-   Portée strictement locale au navigateur du poste (cf. disclaimer dans ImportScreen) :
-   aucune de ces données ne quitte le navigateur via ce mécanisme. */
-const IDB_DB_NAME = 'psp_tool_db';
-const IDB_DB_VERSION = 1;
-const IDB_STORE = 'psp_saved_imports';
-
-function idbOpen(){
-  return new Promise((resolve, reject)=>{
-    if (typeof indexedDB === 'undefined'){ reject(new Error('IndexedDB indisponible dans ce navigateur/contexte.')); return; }
-    const req = indexedDB.open(IDB_DB_NAME, IDB_DB_VERSION);
-    req.onupgradeneeded = ()=>{
-      const db = req.result;
-      if (!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE, {keyPath:'id'});
-    };
-    req.onsuccess = ()=>resolve(req.result);
-    req.onerror = ()=>reject(req.error || new Error('Échec d’ouverture d’IndexedDB'));
-  });
+/* ---------------- Sauvegarde partagée des imports (Supabase) ----------------
+   Les imports sauvegardés sont stockés dans une table Supabase commune à tous les visiteurs de
+   l'outil : quiconque ouvre la page voit et peut modifier/supprimer les mêmes sauvegardes (pas de
+   compte, pas de distinction lecture/écriture — protection uniquement via les politiques RLS de la
+   table, cf. README). L'enregistrement complet (données + simulation en cours) est stocké tel quel
+   dans la colonne jsonb `payload` de la table SB_TABLE. */
+const SUPABASE_URL = 'https://nmbcfoutaysgeiqnkicr.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable_7oUKBCknllyV5XO7lyJkZg_gfzv0DCK';
+const SB_TABLE = 'psp_shared_imports';
+const sbClient = (typeof window!=='undefined' && window.supabase && !/^REMPLACER_/.test(SUPABASE_URL))
+  ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+  : null;
+function sbRequireClient(){
+  if (!sbClient) throw new Error('Sauvegarde partagée indisponible : configuration Supabase manquante (SUPABASE_URL / SUPABASE_ANON_KEY).');
+  return sbClient;
 }
 async function idbGetAll(){
-  try {
-    const db = await idbOpen();
-    return await new Promise((resolve, reject)=>{
-      const tx = db.transaction(IDB_STORE, 'readonly');
-      const req = tx.objectStore(IDB_STORE).getAll();
-      req.onsuccess = ()=>resolve(req.result || []);
-      req.onerror = ()=>reject(req.error);
-    });
-  } catch (e){ return []; }
+  if (!sbClient) return [];
+  const { data, error } = await sbClient.from(SB_TABLE).select('payload');
+  if (error) throw error;
+  return (data || []).map((row)=>row.payload);
 }
 async function idbGet(id){
-  try {
-    const db = await idbOpen();
-    return await new Promise((resolve, reject)=>{
-      const tx = db.transaction(IDB_STORE, 'readonly');
-      const req = tx.objectStore(IDB_STORE).get(id);
-      req.onsuccess = ()=>resolve(req.result || null);
-      req.onerror = ()=>reject(req.error);
-    });
-  } catch (e){ return null; }
+  if (!sbClient) return null;
+  const { data, error } = await sbClient.from(SB_TABLE).select('payload').eq('id', id).maybeSingle();
+  if (error) throw error;
+  return data ? data.payload : null;
 }
 async function idbPut(record){
-  const db = await idbOpen();
-  return await new Promise((resolve, reject)=>{
-    const tx = db.transaction(IDB_STORE, 'readwrite');
-    tx.objectStore(IDB_STORE).put(record);
-    tx.oncomplete = ()=>resolve(true);
-    tx.onerror = ()=>reject(tx.error || new Error('Échec d’écriture (quota de stockage atteint ?)'));
-  });
+  const client = sbRequireClient();
+  const { error } = await client.from(SB_TABLE).upsert({ id: record.id, payload: record, updated_at: new Date().toISOString() });
+  if (error) throw error;
+  return true;
 }
 async function idbDelete(id){
-  const db = await idbOpen();
-  return await new Promise((resolve, reject)=>{
-    const tx = db.transaction(IDB_STORE, 'readwrite');
-    tx.objectStore(IDB_STORE).delete(id);
-    tx.oncomplete = ()=>resolve(true);
-    tx.onerror = ()=>reject(tx.error);
-  });
+  const client = sbRequireClient();
+  const { error } = await client.from(SB_TABLE).delete().eq('id', id);
+  if (error) throw error;
+  return true;
 }
 // Un seul import "base" à la fois : logique centralisée ici, jamais dupliquée entre l'écran de
 // liste et un éventuel autre point d'entrée (cf. points de vigilance de la spec).
@@ -1141,7 +1120,7 @@ function ImportScreen({onLoaded, onRestore, onBaseChanged}){
         estBase: false,
       });
       try { await idbPut(record); await refreshSaves(); }
-      catch(err){ setImportJsonError("Échec de l'enregistrement local (quota de stockage du navigateur atteint ?)."); }
+      catch(err){ setImportJsonError("Échec de l'enregistrement (connexion au service de sauvegarde partagée impossible)."); }
     };
     reader.onerror = ()=>setImportJsonError("Impossible de lire ce fichier.");
     reader.readAsText(file);
@@ -1288,7 +1267,7 @@ function ImportScreen({onLoaded, onRestore, onBaseChanged}){
         <div style={{maxWidth:960,width:'100%',marginTop:40}}>
           <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',flexWrap:'wrap',gap:10,marginBottom:12}}>
             {saves && saves.length>0 ? (
-              <h2 style={{fontSize:'1rem',fontWeight:700,color:'var(--ce-vert-tres-fonce)'}}>Vos sauvegardes</h2>
+              <h2 style={{fontSize:'1rem',fontWeight:700,color:'var(--ce-vert-tres-fonce)'}}>Sauvegardes partagées</h2>
             ) : <span></span>}
             <div>
               <button className="ce-btn-outline ce-btn-sm" onClick={()=>jsonInputRef.current && jsonInputRef.current.click()}>📁 Importer une sauvegarde (JSON)</button>
@@ -1357,7 +1336,7 @@ function ImportScreen({onLoaded, onRestore, onBaseChanged}){
           )}
         </div>
       </div>
-      <div className="ce-footer">cellance — Document confidentiel — Traitement 100% local, aucune donnée transmise (sauvegardes stockées dans ce navigateur, jamais transmises)</div>
+      <div className="ce-footer">cellance — Document confidentiel — Traitement de l'import 100% local ; les sauvegardes sont partagées (visibles par tous les visiteurs de cet outil)</div>
     </div>
   );
 }
@@ -1372,8 +1351,8 @@ function SaveImportModal({defaultName, hasExisting, onCancel, onSave, onSaveAs})
         <label style={{fontSize:'.68rem',fontWeight:700,color:'var(--ce-vert-fonce)',textTransform:'uppercase',letterSpacing:'.03em'}}>Nom</label>
         <input className="ce-input" style={{width:'100%',marginTop:5,marginBottom:6}} value={name} onChange={(e)=>setName(e.target.value)} autoFocus />
         <p style={{fontSize:'.68rem',color:'var(--ce-vert-fonce)',marginBottom:16,lineHeight:1.5}}>
-          Sauvegarde stockée localement dans ce navigateur (IndexedDB), pas transmise. Pour la partager avec un
-          collègue, utilisez « Exporter » depuis le tableau « Vos sauvegardes » sur l'écran d'import.
+          Sauvegarde partagée : visible et modifiable par toute personne ayant accès à cet outil, pas seulement
+          vous. Utilisez « Exporter » depuis le tableau « Sauvegardes partagées » pour en garder une copie locale.
         </p>
         <div style={{display:'flex',gap:8,justifyContent:'flex-end',flexWrap:'wrap'}}>
           <button className="ce-btn-outline ce-btn-sm" onClick={onCancel}>Annuler</button>
@@ -4668,7 +4647,7 @@ function App(){
   const [filters, setFilters] = useState({commune:'',secteur:'',famille:'',dpe:'',qpv:''});
   const [activeTab, setActiveTab] = useState('ensemble');
   const [selectedResidence, setSelectedResidence] = useState(null);
-  const [currentSaveId, setCurrentSaveId] = useState(null); // id de la sauvegarde IndexedDB dont provient l'import actuellement ouvert (null si import Excel frais)
+  const [currentSaveId, setCurrentSaveId] = useState(null); // id de la sauvegarde partagée dont provient l'import actuellement ouvert (null si import Excel frais)
   const [showSaveModal, setShowSaveModal] = useState(false);
   const [saveToast, setSaveToast] = useState(null);
   const [baseImport, setBaseImport] = useState(null); // version "base" chargée en parallèle, lecture seule (cf. spec comparaison inline)
@@ -4742,7 +4721,7 @@ function App(){
       setSaveToast('Import sauvegardé sous « '+name+' ».');
       setBaseRefreshTick((t)=>t+1);
     } catch (e){
-      setSaveToast("Échec de la sauvegarde (quota de stockage du navigateur atteint ?).");
+      setSaveToast("Échec de la sauvegarde (connexion au service de sauvegarde partagée impossible).");
     }
     setTimeout(()=>setSaveToast(null), 4000);
   }
@@ -4875,7 +4854,7 @@ function App(){
         )}
       </div>
 
-      <div className="ce-footer">cellance — Document confidentiel — Traitement 100% local ; seule exception : l'onglet Cartographie transmet les adresses des résidences à l'API publique api-adresse.data.gouv.fr pour les géolocaliser</div>
+      <div className="ce-footer">cellance — Document confidentiel — Traitement 100% local ; exceptions : l'onglet Cartographie transmet les adresses des résidences à l'API publique api-adresse.data.gouv.fr pour les géolocaliser, et les sauvegardes sont partagées (visibles par tous les visiteurs de cet outil)</div>
       <ResidenceDrawer residence={selectedResidence} operations={simOperations} residences={filteredResidences} onClose={()=>setSelectedResidence(null)} gainsGrid={data.gainsGrid} hasGainsGrid={data.hasGainsGrid} includeIdentifiees={includeIdentifiees} baseImport={baseImportFiltered} />
     </div>
   );
