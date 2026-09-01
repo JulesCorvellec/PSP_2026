@@ -815,8 +815,13 @@ const STATUS_COLORS = {good:'#0ca30c', warning:'#fab219', serious:'#ec835a', cri
 /* ---------------- Géocodage adresse -> lat/lon (cartographie) ----------------
    Utilise l'API publique et gratuite api-adresse.data.gouv.fr (Base Adresse Nationale).
    Seule l'adresse texte de la résidence est envoyée à ce service tiers — aucune autre
-   donnée du fichier importé. Les résultats sont mis en cache dans le localStorage du
-   navigateur (par adresse normalisée) pour éviter de re-géocoder à chaque session. */
+   donnée du fichier importé. Les résultats sont mis en cache à deux niveaux : le
+   localStorage du navigateur (le plus rapide, consulté en premier) puis une table
+   Supabase partagée par tous les visiteurs (psp_geocode_cache, cf. sbGeocodeCacheGetMany/
+   SetMany plus bas) — une adresse déjà géocodée par n'importe quel visiteur, sur n'importe
+   quel appareil, n'est ensuite plus jamais renvoyée à l'API externe. Les deux caches sont
+   best-effort : Supabase indisponible/non configuré dégrade simplement vers un géocodage
+   direct, comme avant. */
 const GEOCODE_CACHE_KEY = 'psp_geocode_cache_v1';
 function ceAddrKey(a){ return ceNorm(a||''); }
 function loadGeocodeCache(){
@@ -855,7 +860,33 @@ function useGeocoding(residences){
     setStatus('loading');
     setProgress({done: residences.length - toFetch.length, total: residences.length});
     (async()=>{
-      for (const r of toFetch){
+      // Cache partagé Supabase : avant d'appeler l'API externe pour les adresses absentes du
+      // localStorage, on regarde si quelqu'un d'autre (même import consulté ailleurs, autre bailleur
+      // partageant des adresses) les a déjà géocodées — c'est ce qui rend un import déjà consulté par
+      // un collègue, ou rouvert depuis un autre appareil/navigateur, quasi instantané sur cet écran.
+      // Best-effort : sans Supabase configuré, ou en cas d'erreur, on continue directement sur l'API
+      // externe comme avant (sbGeocodeCacheGetMany renvoie alors {} sans lever).
+      let stillToFetch = toFetch;
+      if (sbClient){
+        const keys = Array.from(new Set(toFetch.map((r)=>ceAddrKey(r.adresse))));
+        const shared = await sbGeocodeCacheGetMany(keys);
+        const remaining = [];
+        toFetch.forEach((r)=>{
+          const key = ceAddrKey(r.adresse);
+          if (Object.prototype.hasOwnProperty.call(shared, key)){
+            const result = shared[key];
+            cache[key] = result;
+            if (!cancelled) setCoords((prev)=>Object.assign({}, prev, {[r.code]: result}));
+          } else {
+            remaining.push(r);
+          }
+        });
+        stillToFetch = remaining;
+        if (!cancelled) setProgress((prev)=>({done: prev.total - stillToFetch.length, total: prev.total}));
+      }
+
+      const newlyFetched = [];
+      for (const r of stillToFetch){
         if (cancelled) return;
         const key = ceAddrKey(r.adresse);
         let result = null;
@@ -864,7 +895,7 @@ function useGeocoding(residences){
         // rate-limit 429). Sans cette distinction, une coupure réseau pendant l'import marquait
         // l'adresse comme définitivement non géolocalisable dans le localStorage, sans nouvelle
         // tentative possible avant un vidage manuel du cache.
-        try { result = await geocodeOneAddress(r.adresse); cache[key] = result; } catch(e){ result = null; }
+        try { result = await geocodeOneAddress(r.adresse); cache[key] = result; newlyFetched.push({key, result}); } catch(e){ result = null; }
         if (!cancelled){
           setCoords((prev)=>Object.assign({}, prev, {[r.code]: result}));
           setProgress((prev)=>({done: prev.done+1, total: prev.total}));
@@ -872,6 +903,9 @@ function useGeocoding(residences){
         await new Promise((r2)=>setTimeout(r2, 130));
       }
       saveGeocodeCache(cache);
+      // Alimente le cache partagé pour les prochains visiteurs — fire-and-forget (best-effort), ne
+      // doit jamais retarder l'affichage de la carte pour l'utilisateur courant.
+      if (newlyFetched.length) sbGeocodeCacheSetMany(newlyFetched);
       if (!cancelled) setStatus('done');
     })();
     return ()=>{ cancelled = true; };
@@ -918,6 +952,44 @@ async function idbDelete(id){
   const { error } = await client.from(SB_TABLE).delete().eq('id', id);
   if (error) throw error;
   return true;
+}
+
+/* ---------------- Cache de géolocalisation partagé (Supabase) ----------------
+   Table distincte de SB_TABLE : une ligne par adresse normalisée (clé = ceAddrKey), quel que soit
+   l'import ou le visiteur d'origine — un géocodage effectué une fois profite à tout le monde ensuite.
+   Best-effort par construction (cf. useGeocoding) : sans cette table créée côté Supabase (voir
+   README), ces fonctions échouent silencieusement et l'outil retombe sur le comportement précédent
+   (géocodage direct + cache localStorage uniquement). */
+const SB_GEOCODE_TABLE = 'psp_geocode_cache';
+function chunkArray(arr, size){
+  const out = []; for (let i=0;i<arr.length;i+=size) out.push(arr.slice(i,i+size)); return out;
+}
+async function sbGeocodeCacheGetMany(keys){
+  if (!sbClient || !keys.length) return {};
+  const out = {};
+  // .in() encode la liste de clés dans l'URL de la requête : on segmente pour rester sous les
+  // limites de taille d'URL sur un grand parc (plusieurs centaines/milliers d'adresses distinctes).
+  for (const chunk of chunkArray(keys, 300)){
+    try {
+      const { data, error } = await sbClient.from(SB_GEOCODE_TABLE).select('key,lat,lon,label,score').in('key', chunk);
+      if (error || !data) continue;
+      data.forEach((row)=>{
+        out[row.key] = (row.lat===null || row.lat===undefined) ? null : { lat:row.lat, lon:row.lon, label:row.label, score:row.score };
+      });
+    } catch(e){ /* best-effort : une erreur réseau sur un lot ne doit pas bloquer les autres */ }
+  }
+  return out;
+}
+async function sbGeocodeCacheSetMany(entries){
+  if (!sbClient || !entries.length) return;
+  const rows = entries.map(({key, result})=>({
+    key,
+    lat: result? result.lat : null, lon: result? result.lon : null,
+    label: result? result.label : null, score: result? result.score : null,
+    updated_at: new Date().toISOString(),
+  }));
+  try { await sbClient.from(SB_GEOCODE_TABLE).upsert(rows, {onConflict:'key'}); }
+  catch(e){ /* best-effort : un échec d'écriture du cache partagé ne doit jamais bloquer l'affichage de la carte pour l'utilisateur courant */ }
 }
 // Un seul import "base" à la fois : logique centralisée ici, jamais dupliquée entre l'écran de
 // liste et un éventuel autre point d'entrée (cf. points de vigilance de la spec).
