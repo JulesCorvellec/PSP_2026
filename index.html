@@ -56,6 +56,10 @@ html,body{margin:0;padding:0;background:var(--ce-vert-tres-clair);font-family:va
 .ce-btn-corail:hover{opacity:.88;}
 .ce-btn-sm{padding:4px 10px;font-size:.72rem;border-radius:5px;}
 
+.ce-kpi-clickable{cursor:pointer;transition:box-shadow .15s,border-color .15s;}
+.ce-kpi-clickable:hover{box-shadow:0 3px 10px rgba(28,58,53,.12);border-color:var(--ce-vert-principal);}
+.ce-kpi-clickable.active{border-color:var(--ce-vert-principal);box-shadow:0 3px 10px rgba(28,58,53,.12);}
+
 .ce-card{background:#fff;border-radius:10px;padding:18px 20px;box-shadow:0 1px 3px rgba(28,58,53,.08);border:1px solid #eef4f2;}
 .ce-badge{display:inline-block;background:var(--ce-vert-clair);color:var(--ce-vert-tres-fonce);padding:2px 10px;border-radius:20px;font-size:.68rem;font-weight:700;letter-spacing:.02em;}
 .ce-badge-corail{background:var(--ce-corail);color:#fff;}
@@ -425,7 +429,14 @@ function parseBaseCotation(matrix){
     };
     Object.keys(critereGroupCols).forEach((key)=>{
       const g = critereGroupCols[key];
-      const vals = g.cols.map((gc)=>({ label:gc.label, value: ceNum(row[gc.col]) }));
+      const vals = g.cols.map((gc)=>{
+        let value = ceNum(row[gc.col]);
+        // Fragilité sociale : colonnes en fraction Excel brute (0-1, ex. 0.3 pour 30%), contrairement
+        // aux autres groupes déjà notés sur 100 (cf. commentaire plus haut sur idx) — pas d'équivalent
+        // "note/100" pour ce groupe dans le fichier source, donc converti en pourcentage à la lecture.
+        if (key==='social' && value!==null) value = value*100;
+        return { label:gc.label, value };
+      });
       if (vals.some((v)=>v.value!==null)) res.critereGroups[key] = { label:g.label, values: vals };
     });
     noteCols.forEach((nc)=>{ res.notes[nc.label] = ceNum(row[nc.col]); });
@@ -1029,7 +1040,7 @@ function migrateBudgetLignes(rec){
   }
   return [];
 }
-function buildSaveRecord({id, nom, nomFichierSource, gabaritComplet, nbCols, data, simOperations, budgetLignes, offreNouvelleLgt, ventesSimulees, includeIdentifiees, estBase, dateCreation}){
+function buildSaveRecord({id, nom, nomFichierSource, gabaritComplet, nbCols, data, simOperations, budgetLignes, offreNouvelleLgt, ventesSimulees, includeIdentifiees, financeSeuils, customPivotViews, estBase, dateCreation}){
   const now = new Date().toISOString();
   return {
     id: id || genSaveId(),
@@ -1046,6 +1057,8 @@ function buildSaveRecord({id, nom, nomFichierSource, gabaritComplet, nbCols, dat
     offreNouvelleLgt: offreNouvelleLgt || {},
     ventesSimulees: ventesSimulees || [],
     includeIdentifiees,
+    financeSeuils: financeSeuils || {},
+    customPivotViews: customPivotViews || [],
   };
 }
 function isValidSaveRecord(obj){
@@ -1517,7 +1530,7 @@ function ImportScreen({onLoaded, onRestore, onBaseChanged}){
           )}
         </div>
       </div>
-      <div className="ce-footer">cellance — Document confidentiel — Traitement de l'import 100% local ; les sauvegardes sont partagées (visibles par tous les visiteurs de cet outil)</div>
+      <div className="ce-footer">Cellance - Confidentiel</div>
     </div>
   );
 }
@@ -1726,9 +1739,10 @@ function Nav({active, setActive, hasFinance, hasCarto, hasCompare}){
 }
 
 /* ---------------- Vue d'ensemble ---------------- */
-function KpiCard({label, value, sub}){
+function KpiCard({label, value, sub, onClick, active}){
   return (
-    <div className="ce-card" style={{flex:1,minWidth:150}}>
+    <div className={"ce-card"+(onClick?" ce-kpi-clickable":"")+(active?" active":"")} onClick={onClick}
+      style={{flex:1,minWidth:150,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',textAlign:'center',padding:'22px 20px'}}>
       <div style={{fontSize:'.68rem',fontWeight:700,color:'var(--ce-vert-fonce)',textTransform:'uppercase',letterSpacing:'.03em',marginBottom:6}}>{label}</div>
       <div style={{fontSize:'1.7rem',fontWeight:700,color:'var(--ce-vert-principal)'}}>{value}</div>
       {sub && <div style={{fontSize:'.72rem',color:'var(--ce-vert-fonce)',marginTop:2}}>{sub}</div>}
@@ -1748,11 +1762,72 @@ function decennieBucket(annee){
   return start+'-'+(start+10);
 }
 
-function ViewEnsemble({residences, operations}){
+// Lignes "résidence — X lgt" réutilisées par tous les panneaux ouverts au clic sur un graphique dont
+// la catégorie (commune, secteur, décennie, agence) est déjà une donnée résidence entière (pas une
+// sous-répartition par logement) — pas de % à calculer ici, cf. fractionRow/pctResRow ci-dessous pour
+// les graphiques à la maille logement.
+function ensembleSimpleResRow(onSelectResidence){
+  return (r)=>(
+    <div onClick={()=>onSelectResidence && onSelectResidence(r)} style={{display:'flex',justifyContent:'space-between',gap:8,fontSize:'.76rem',color:'var(--ce-vert-fonce)',padding:'3px 0',borderBottom:'1px solid #f0f5f3',cursor:onSelectResidence?'pointer':'default'}}>
+      <span>{r.nom || r.code}</span>
+      <span style={{color:'#9fb3ae',flexShrink:0}}>{fmtNum(r.nbLgt)} lgt</span>
+    </div>
+  );
+}
+// Typologie/DPE : formulation "X/Y logements en {catégorie}" (règle de formatage confirmée avec
+// Jules — le % de la résidence concernée, pas seulement le total de logements).
+function ensembleFractionRow(onSelectResidence, getCount, categoryLabel){
+  return (r)=>{
+    const n = getCount(r);
+    const pct = r.nbLgt>0 ? Math.round(n/r.nbLgt*100) : null;
+    return (
+      <div onClick={()=>onSelectResidence && onSelectResidence(r)} style={{display:'flex',justifyContent:'space-between',gap:8,fontSize:'.76rem',color:'var(--ce-vert-fonce)',padding:'3px 0',borderBottom:'1px solid #f0f5f3',cursor:onSelectResidence?'pointer':'default'}}>
+        <span>{r.nom || r.code}</span>
+        <span style={{color:'#9fb3ae',flexShrink:0}}>{fmtNum(n)}/{fmtNum(r.nbLgt)} lgt en {categoryLabel}{pct!==null?' ('+pct+'%)':''}</span>
+      </div>
+    );
+  };
+}
+// Chauffage/ECS/individuel-collectif/financement : formulation validée par Jules ("55% de logements
+// PLUS/Électrique dans la résidence"). Ces champs sont une valeur unique par résidence dans le
+// gabarit importé (pas une sous-répartition par logement, cf. chauffageTotals/ecsTotals ci-dessous)
+// : le % vaut donc toujours 100 ici — cohérent avec la donnée disponible, pas une approximation.
+function ensemblePctResRow(onSelectResidence, modeLabel){
+  return (r)=>(
+    <div onClick={()=>onSelectResidence && onSelectResidence(r)} style={{display:'flex',justifyContent:'space-between',gap:8,fontSize:'.76rem',color:'var(--ce-vert-fonce)',padding:'3px 0',borderBottom:'1px solid #f0f5f3',cursor:onSelectResidence?'pointer':'default'}}>
+      <span>{r.nom || r.code}</span>
+      <span style={{color:'#9fb3ae',flexShrink:0}}>100% de logements {modeLabel} dans la résidence ({fmtNum(r.nbLgt)} lgt)</span>
+    </div>
+  );
+}
+
+function ViewEnsemble({residences, operations, onSelectResidence}){
   const [dpeType, setDpeType] = useState('energie');
   const totalLgt = residences.reduce((s,r)=>s+r.nbLgt,0);
   const communesCount = uniqueSorted(residences.map((r)=>r.commune)).length;
   const totalInvest = operations.reduce((s,o)=>s+(o.montant||0),0);
+  // Panneau ouvert au clic sur une KPI (une seule à la fois, cf. §2.2) : positionné sous la ligne de
+  // KPI, distinct des panneaux par graphique ci-dessous (chartPanel, un par carte).
+  const [kpiPanel, setKpiPanel] = useState(null); // {key, title, rows, renderRow}
+  function toggleKpiPanel(key, data){ setKpiPanel((cur)=> (cur && cur.key===key) ? null : Object.assign({key}, data)); }
+  // Panneau ouvert au clic sur une barre/part de graphique (§2.3) : un seul objet partagé, discriminé
+  // par `chart` pour savoir sous quelle carte l'afficher — équivalent du `pinned`/`drillIdx` déjà
+  // utilisé ailleurs dans l'outil (Segmentation, Impact, Pivot), appliqué ici aux graphiques de la
+  // Vue d'ensemble.
+  const [chartPanel, setChartPanel] = useState(null); // {chart, value, title, rows, renderRow}
+  function toggleChartPanel(chart, value, data){
+    setChartPanel((cur)=> (cur && cur.chart===chart && cur.value===value) ? null : Object.assign({chart, value}, data));
+  }
+  const simpleResRow = useMemo(()=>ensembleSimpleResRow(onSelectResidence), [onSelectResidence]);
+
+  const resByCode = useMemo(()=>{ const m={}; residences.forEach((r)=>m[r.code]=r); return m; }, [residences]);
+  // Agrégat complet par commune (pas seulement le top 5 du graphique) pour le panneau de la KPI
+  // "Communes" — l'info utile ici est l'agrégat par commune, pas une liste de résidences (§2.2).
+  const communesAgg = useMemo(()=>{
+    const m = {};
+    residences.forEach((r)=>{ if (r.commune){ if(!m[r.commune]) m[r.commune]={commune:r.commune, nbRes:0, nbLgt:0}; m[r.commune].nbRes++; m[r.commune].nbLgt+=(r.nbLgt||0); } });
+    return Object.values(m).sort((a,b)=>b.nbLgt-a.nbLgt);
+  }, [residences]);
 
   const topCommunes = useMemo(()=>{
     const m = {};
@@ -1786,6 +1861,12 @@ function ViewEnsemble({residences, operations}){
   }, [residences, dpeType]);
   const hasDpeDist = Object.values(dpeTotals).some((v)=>v>0);
   const dpeTypeLabel = dpeType==='principal'?'Principal':dpeType==='ges'?'GES':'Énergie';
+  const dpeLabels = Object.keys(dpeTotals).filter((k)=>dpeTotals[k]>0);
+  function dpeCountFor(cl){
+    if (dpeType==='principal') return (r)=> String(r.dpePrincipal||'').toUpperCase()===cl ? (r.nbLgt||0) : 0;
+    const key = dpeType==='ges' ? 'distGES' : 'distEnergie';
+    return (r)=> (r[key] && r[key][cl]) || 0;
+  }
 
   // Indicateurs additionnels V4 (cf. commentaire au-dessus de parseBaseCotation pour la provenance
   // des colonnes) : chacun ne s'affiche que si la colonne correspondante a été trouvée dans le
@@ -1845,12 +1926,83 @@ function ViewEnsemble({residences, operations}){
       <div style={{display:'flex',gap:16,flexWrap:'wrap'}}>
         <KpiCard label="Logements" value={fmtNum(totalLgt)} />
         <KpiCard label="Résidences" value={fmtNum(residences.length)} />
-        <KpiCard label="Communes" value={fmtNum(communesCount)} />
-        <KpiCard label="Budget investissements (import)" value={fmtKEur(totalInvest)} sub={operations.length+" opérations importées"} />
-        {hasQpv && <KpiCard label="Logements en QPV" value={fmtNum(qpvLgt)} sub={totalLgt>0? ((qpvLgt/totalLgt)*100).toFixed(0)+"% du parc":null} />}
-        {hasConventionne && <KpiCard label="Logements conventionnés" value={fmtNum(conventionneLgt)} />}
-        {hasFoyer && <KpiCard label="Logements en foyer / résidence sociale" value={fmtNum(foyerLgt)} />}
+        <KpiCard label="Communes" value={fmtNum(communesCount)} active={kpiPanel && kpiPanel.key==='communes'}
+          onClick={()=>toggleKpiPanel('communes', {
+            title: communesAgg.length+' commune'+(communesAgg.length>1?'s':''),
+            rows: communesAgg,
+            renderRow: (c)=>(
+              <div style={{display:'flex',justifyContent:'space-between',gap:8,fontSize:'.76rem',color:'var(--ce-vert-fonce)',padding:'3px 0',borderBottom:'1px solid #f0f5f3'}}>
+                <span>{c.commune}</span>
+                <span style={{color:'#9fb3ae',flexShrink:0}}>{c.nbRes} résidence{c.nbRes>1?'s':''} — {fmtNum(c.nbLgt)} lgt</span>
+              </div>
+            ),
+          })} />
+        <KpiCard label="Budget investissements (import)" value={fmtKEur(totalInvest)} sub={operations.length+" opérations importées"} active={kpiPanel && kpiPanel.key==='budget'}
+          onClick={()=>toggleKpiPanel('budget', {
+            title: operations.length+' opération'+(operations.length>1?'s':''),
+            rows: operations,
+            renderRow: (o)=>{
+              const r = resByCode[o.resCode];
+              return (
+                <div onClick={()=>r && onSelectResidence && onSelectResidence(r)} style={{display:'flex',justifyContent:'space-between',gap:8,fontSize:'.76rem',color:'var(--ce-vert-fonce)',padding:'3px 0',borderBottom:'1px solid #f0f5f3',cursor:(r&&onSelectResidence)?'pointer':'default'}}>
+                  <span>{(r&&r.nom)||o.resCode||'—'}</span>
+                  <span style={{color:'#9fb3ae',flexShrink:0}}>{o.nature||o.type||'Non renseigné'} · {o.annee||'année n.c.'} · {fmtEur(o.montant)}</span>
+                </div>
+              );
+            },
+          })} />
+        {hasQpv && <KpiCard label="Logements en QPV" value={fmtNum(qpvLgt)} sub={totalLgt>0? ((qpvLgt/totalLgt)*100).toFixed(0)+"% du parc":null} active={kpiPanel && kpiPanel.key==='qpv'}
+          onClick={()=>{
+            const rows = residences.filter((r)=>isQpvValue(r.qpv));
+            toggleKpiPanel('qpv', {
+              title: rows.length+' résidence'+(rows.length>1?'s':'')+' en QPV',
+              rows,
+              renderRow: (r)=>(
+                <div onClick={()=>onSelectResidence && onSelectResidence(r)} style={{display:'flex',justifyContent:'space-between',gap:8,fontSize:'.76rem',color:'var(--ce-vert-fonce)',padding:'3px 0',borderBottom:'1px solid #f0f5f3',cursor:onSelectResidence?'pointer':'default'}}>
+                  <span>{r.nom || r.code}</span>
+                  <span style={{color:'#9fb3ae',flexShrink:0}}>{fmtNum(r.nbLgt)} lgt — 100% en QPV</span>
+                </div>
+              ),
+            });
+          }} />}
+        {hasConventionne && <KpiCard label="Logements conventionnés" value={fmtNum(conventionneLgt)} active={kpiPanel && kpiPanel.key==='conventionne'}
+          onClick={()=>{
+            const rows = residences.filter((r)=>(r.dontConventionne||0)>0);
+            toggleKpiPanel('conventionne', {
+              title: rows.length+' résidence'+(rows.length>1?'s':'')+' avec logements conventionnés',
+              rows,
+              renderRow: (r)=>{
+                const n = r.dontConventionne||0;
+                const pct = r.nbLgt>0 ? Math.round(n/r.nbLgt*100) : null;
+                return (
+                  <div onClick={()=>onSelectResidence && onSelectResidence(r)} style={{display:'flex',justifyContent:'space-between',gap:8,fontSize:'.76rem',color:'var(--ce-vert-fonce)',padding:'3px 0',borderBottom:'1px solid #f0f5f3',cursor:onSelectResidence?'pointer':'default'}}>
+                    <span>{r.nom || r.code}</span>
+                    <span style={{color:'#9fb3ae',flexShrink:0}}>{fmtNum(n)} lgt conventionnés{pct!==null?' ('+pct+'% de la résidence)':''}</span>
+                  </div>
+                );
+              },
+            });
+          }} />}
+        {hasFoyer && <KpiCard label="Logements en foyer / résidence sociale" value={fmtNum(foyerLgt)} active={kpiPanel && kpiPanel.key==='foyer'}
+          onClick={()=>{
+            const rows = residences.filter((r)=>(r.dontFoyer||0)>0);
+            toggleKpiPanel('foyer', {
+              title: rows.length+' résidence'+(rows.length>1?'s':'')+' en foyer / résidence sociale',
+              rows,
+              renderRow: (r)=>{
+                const n = r.dontFoyer||0;
+                const pct = r.nbLgt>0 ? Math.round(n/r.nbLgt*100) : null;
+                return (
+                  <div onClick={()=>onSelectResidence && onSelectResidence(r)} style={{display:'flex',justifyContent:'space-between',gap:8,fontSize:'.76rem',color:'var(--ce-vert-fonce)',padding:'3px 0',borderBottom:'1px solid #f0f5f3',cursor:onSelectResidence?'pointer':'default'}}>
+                    <span>{r.nom || r.code}</span>
+                    <span style={{color:'#9fb3ae',flexShrink:0}}>{fmtNum(n)} lgt en foyer{pct!==null?' ('+pct+'% de la résidence)':''}</span>
+                  </div>
+                );
+              },
+            });
+          }} />}
       </div>
+      {kpiPanel && <ResidenceListPanel title={kpiPanel.title} rows={kpiPanel.rows} renderRow={kpiPanel.renderRow} onClose={()=>setKpiPanel(null)} />}
 
       <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16}}>
         {topCommunes.length>0 && (
@@ -1859,7 +2011,13 @@ function ViewEnsemble({residences, operations}){
             <ChartCanvas type="bar" height={220} data={{
               labels: topCommunes.map((c)=>c[0]),
               datasets:[{label:'Logements', data:topCommunes.map((c)=>c[1]), backgroundColor:'#009261', borderRadius:4}]
-            }} options={{indexAxis:'y', plugins:{legend:{display:false}}, scales:{x:{beginAtZero:true}}}} />
+            }} options={{indexAxis:'y', plugins:{legend:{display:false}}, scales:{x:{beginAtZero:true}}, onClick:(evt,elements)=>{
+              if (!elements.length) return;
+              const commune = topCommunes[elements[0].index][0];
+              const rows = residences.filter((r)=>r.commune===commune);
+              toggleChartPanel('communes', commune, {title:'Résidences de '+commune+' ('+rows.length+')', rows, renderRow:simpleResRow});
+            }}} />
+            {chartPanel && chartPanel.chart==='communes' && <ResidenceListPanel title={chartPanel.title} rows={chartPanel.rows} renderRow={chartPanel.renderRow} onClose={()=>setChartPanel(null)} maxHeight={240} />}
           </div>
         )}
         {topSecteurs.length>0 && (
@@ -1868,7 +2026,13 @@ function ViewEnsemble({residences, operations}){
             <ChartCanvas type="bar" height={220} data={{
               labels: topSecteurs.map((c)=>c[0]),
               datasets:[{label:'Logements', data:topSecteurs.map((c)=>c[1]), backgroundColor:'#FF8364', borderRadius:4}]
-            }} options={{indexAxis:'y', plugins:{legend:{display:false}}, scales:{x:{beginAtZero:true}}}} />
+            }} options={{indexAxis:'y', plugins:{legend:{display:false}}, scales:{x:{beginAtZero:true}}, onClick:(evt,elements)=>{
+              if (!elements.length) return;
+              const secteur = topSecteurs[elements[0].index][0];
+              const rows = residences.filter((r)=>(r.secteur||r.agence)===secteur);
+              toggleChartPanel('secteurs', secteur, {title:'Résidences de '+secteur+' ('+rows.length+')', rows, renderRow:simpleResRow});
+            }}} />
+            {chartPanel && chartPanel.chart==='secteurs' && <ResidenceListPanel title={chartPanel.title} rows={chartPanel.rows} renderRow={chartPanel.renderRow} onClose={()=>setChartPanel(null)} maxHeight={240} />}
           </div>
         )}
         {hasTypo && (
@@ -1876,7 +2040,14 @@ function ViewEnsemble({residences, operations}){
             <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700,marginBottom:12}}>Répartition par typologie</h2>
             <ChartCanvas type="doughnut" height={220} data={{
               labels: Object.keys(typoTotals), datasets:[{data:Object.values(typoTotals), backgroundColor:PALETTE}]
-            }} />
+            }} options={{onClick:(evt,elements)=>{
+              if (!elements.length) return;
+              const typo = Object.keys(typoTotals)[elements[0].index];
+              const getCount = (r)=>r[typo]||0;
+              const rows = residences.filter((r)=>getCount(r)>0);
+              toggleChartPanel('typologie', typo, {title:'Résidences avec des logements '+typo+' ('+rows.length+')', rows, renderRow:ensembleFractionRow(onSelectResidence, getCount, typo)});
+            }}} />
+            {chartPanel && chartPanel.chart==='typologie' && <ResidenceListPanel title={chartPanel.title} rows={chartPanel.rows} renderRow={chartPanel.renderRow} onClose={()=>setChartPanel(null)} maxHeight={240} />}
           </div>
         )}
         {hasDpeDist && (
@@ -1884,15 +2055,22 @@ function ViewEnsemble({residences, operations}){
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12,flexWrap:'wrap',gap:8}}>
               <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700}}>Répartition DPE {dpeTypeLabel} (logements)</h2>
               <div style={{display:'flex',gap:6}}>
-                {hasDpePrincipal && <button className={dpeType==='principal'?'ce-btn ce-btn-sm':'ce-btn-outline ce-btn-sm'} onClick={()=>setDpeType('principal')}>Principal</button>}
-                <button className={dpeType==='energie'?'ce-btn ce-btn-sm':'ce-btn-outline ce-btn-sm'} onClick={()=>setDpeType('energie')}>Énergie</button>
-                <button className={dpeType==='ges'?'ce-btn ce-btn-sm':'ce-btn-outline ce-btn-sm'} onClick={()=>setDpeType('ges')}>GES</button>
+                {hasDpePrincipal && <button className={dpeType==='principal'?'ce-btn ce-btn-sm':'ce-btn-outline ce-btn-sm'} onClick={()=>{setDpeType('principal'); setChartPanel(null);}}>Principal</button>}
+                <button className={dpeType==='energie'?'ce-btn ce-btn-sm':'ce-btn-outline ce-btn-sm'} onClick={()=>{setDpeType('energie'); setChartPanel(null);}}>Énergie</button>
+                <button className={dpeType==='ges'?'ce-btn ce-btn-sm':'ce-btn-outline ce-btn-sm'} onClick={()=>{setDpeType('ges'); setChartPanel(null);}}>GES</button>
               </div>
             </div>
             <ChartCanvas type="doughnut" height={220} data={{
-              labels: Object.keys(dpeTotals).filter(k=>dpeTotals[k]>0),
-              datasets:[{data:Object.keys(dpeTotals).filter(k=>dpeTotals[k]>0).map(k=>dpeTotals[k]), backgroundColor:Object.keys(dpeTotals).filter(k=>dpeTotals[k]>0).map(k=>DPE_COLORS[k])}]
-            }} />
+              labels: dpeLabels,
+              datasets:[{data:dpeLabels.map(k=>dpeTotals[k]), backgroundColor:dpeLabels.map(k=>DPE_COLORS[k])}]
+            }} options={{onClick:(evt,elements)=>{
+              if (!elements.length) return;
+              const cl = dpeLabels[elements[0].index];
+              const getCount = dpeCountFor(cl);
+              const rows = residences.filter((r)=>getCount(r)>0);
+              toggleChartPanel('dpe', dpeType+'|'+cl, {title:'Résidences avec des logements en classe '+cl+' ('+rows.length+')', rows, renderRow:ensembleFractionRow(onSelectResidence, getCount, 'classe '+cl)});
+            }}} />
+            {chartPanel && chartPanel.chart==='dpe' && <ResidenceListPanel title={chartPanel.title} rows={chartPanel.rows} renderRow={chartPanel.renderRow} onClose={()=>setChartPanel(null)} maxHeight={240} />}
           </div>
         )}
         {hasDecennie && (
@@ -1901,7 +2079,13 @@ function ViewEnsemble({residences, operations}){
             <ChartCanvas type="bar" height={220} data={{
               labels: decennieData.map((d)=>d.bucket),
               datasets:[{label:'Logements', data: decennieData.map((d)=>d.total), backgroundColor:'#009261', borderRadius:4}]
-            }} options={{plugins:{legend:{display:false}}, scales:{y:{beginAtZero:true}}}} />
+            }} options={{plugins:{legend:{display:false}}, scales:{y:{beginAtZero:true}}, onClick:(evt,elements)=>{
+              if (!elements.length) return;
+              const bucket = decennieData[elements[0].index].bucket;
+              const rows = residences.filter((r)=>r.anneeConstruction && decennieBucket(r.anneeConstruction)===bucket);
+              toggleChartPanel('decennie', bucket, {title:'Résidences construites '+bucket+' ('+rows.length+')', rows, renderRow:simpleResRow});
+            }}} />
+            {chartPanel && chartPanel.chart==='decennie' && <ResidenceListPanel title={chartPanel.title} rows={chartPanel.rows} renderRow={chartPanel.renderRow} onClose={()=>setChartPanel(null)} maxHeight={240} />}
           </div>
         )}
         {allAgences.length>0 && (
@@ -1910,7 +2094,13 @@ function ViewEnsemble({residences, operations}){
             <ChartCanvas type="bar" height={Math.max(220, allAgences.length*26)} data={{
               labels: allAgences.map((c)=>c[0]),
               datasets:[{label:'Logements', data: allAgences.map((c)=>c[1]), backgroundColor:'#264E46', borderRadius:4}]
-            }} options={{indexAxis:'y', plugins:{legend:{display:false}}, scales:{x:{beginAtZero:true}}}} />
+            }} options={{indexAxis:'y', plugins:{legend:{display:false}}, scales:{x:{beginAtZero:true}}, onClick:(evt,elements)=>{
+              if (!elements.length) return;
+              const agence = allAgences[elements[0].index][0];
+              const rows = residences.filter((r)=>r.agence===agence);
+              toggleChartPanel('agence', agence, {title:'Résidences de l\'agence '+agence+' ('+rows.length+')', rows, renderRow:simpleResRow});
+            }}} />
+            {chartPanel && chartPanel.chart==='agence' && <ResidenceListPanel title={chartPanel.title} rows={chartPanel.rows} renderRow={chartPanel.renderRow} onClose={()=>setChartPanel(null)} maxHeight={240} />}
           </div>
         )}
         {hasTypeBati && (
@@ -1919,47 +2109,103 @@ function ViewEnsemble({residences, operations}){
             <ChartCanvas type="doughnut" height={220} data={{
               labels: Object.keys(typeBatiTotals),
               datasets:[{data:Object.values(typeBatiTotals), backgroundColor: Object.keys(typeBatiTotals).map((k)=>typeBatiColor(k))}]
-            }} />
+            }} options={{onClick:(evt,elements)=>{
+              if (!elements.length) return;
+              const value = Object.keys(typeBatiTotals)[elements[0].index];
+              const rows = residences.filter((r)=>r.typeBati && String(r.typeBati).trim()===value);
+              toggleChartPanel('typeBati', value, {title:'Résidences « '+value+' » ('+rows.length+')', rows, renderRow:ensemblePctResRow(onSelectResidence, value)});
+            }}} />
+            {chartPanel && chartPanel.chart==='typeBati' && <ResidenceListPanel title={chartPanel.title} rows={chartPanel.rows} renderRow={chartPanel.renderRow} onClose={()=>setChartPanel(null)} maxHeight={240} />}
           </div>
         )}
-        {Object.keys(chauffageTotals).length>0 && (
-          <div className="ce-card">
-            <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700,marginBottom:12}}>Mode de chauffage (logements)</h2>
-            {Object.keys(chauffageTotals).length>6 ? (
-              <ChartCanvas type="bar" height={Math.max(220, Object.keys(chauffageTotals).length*26)} data={{
-                labels: Object.keys(chauffageTotals), datasets:[{data:Object.values(chauffageTotals), backgroundColor:'#FF8364', borderRadius:4}]
-              }} options={{indexAxis:'y', plugins:{legend:{display:false}}, scales:{x:{beginAtZero:true}}}} />
-            ) : (
-              <ChartCanvas type="doughnut" height={220} data={{
-                labels: Object.keys(chauffageTotals), datasets:[{data:Object.values(chauffageTotals), backgroundColor: Object.keys(chauffageTotals).map((_,i)=>PALETTE[i%PALETTE.length])}]
-              }} />
-            )}
-          </div>
-        )}
-        {Object.keys(ecsTotals).length>0 && (
-          <div className="ce-card">
-            <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700,marginBottom:12}}>Mode de production ECS (logements)</h2>
-            {Object.keys(ecsTotals).length>6 ? (
-              <ChartCanvas type="bar" height={Math.max(220, Object.keys(ecsTotals).length*26)} data={{
-                labels: Object.keys(ecsTotals), datasets:[{data:Object.values(ecsTotals), backgroundColor:'#FF8364', borderRadius:4}]
-              }} options={{indexAxis:'y', plugins:{legend:{display:false}}, scales:{x:{beginAtZero:true}}}} />
-            ) : (
-              <ChartCanvas type="doughnut" height={220} data={{
-                labels: Object.keys(ecsTotals), datasets:[{data:Object.values(ecsTotals), backgroundColor: Object.keys(ecsTotals).map((_,i)=>PALETTE[i%PALETTE.length])}]
-              }} />
-            )}
-          </div>
-        )}
+        {Object.keys(chauffageTotals).length>0 && (()=>{
+          const chauffageClickOptions = {onClick:(evt,elements)=>{
+            if (!elements.length) return;
+            const mode = Object.keys(chauffageTotals)[elements[0].index];
+            const rows = residences.filter((r)=>r.modeChauffage && String(r.modeChauffage).trim()===mode);
+            toggleChartPanel('chauffage', mode, {title:'Résidences en chauffage « '+mode+' » ('+rows.length+')', rows, renderRow:ensemblePctResRow(onSelectResidence, mode)});
+          }};
+          return (
+            <div className="ce-card">
+              <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700,marginBottom:12}}>Mode de chauffage (logements)</h2>
+              {Object.keys(chauffageTotals).length>6 ? (
+                <ChartCanvas type="bar" height={Math.max(220, Object.keys(chauffageTotals).length*26)} data={{
+                  labels: Object.keys(chauffageTotals), datasets:[{data:Object.values(chauffageTotals), backgroundColor:'#FF8364', borderRadius:4}]
+                }} options={Object.assign({indexAxis:'y', plugins:{legend:{display:false}}, scales:{x:{beginAtZero:true}}}, chauffageClickOptions)} />
+              ) : (
+                <ChartCanvas type="doughnut" height={220} data={{
+                  labels: Object.keys(chauffageTotals), datasets:[{data:Object.values(chauffageTotals), backgroundColor: Object.keys(chauffageTotals).map((_,i)=>PALETTE[i%PALETTE.length])}]
+                }} options={chauffageClickOptions} />
+              )}
+              {chartPanel && chartPanel.chart==='chauffage' && <ResidenceListPanel title={chartPanel.title} rows={chartPanel.rows} renderRow={chartPanel.renderRow} onClose={()=>setChartPanel(null)} maxHeight={240} />}
+            </div>
+          );
+        })()}
+        {Object.keys(ecsTotals).length>0 && (()=>{
+          const ecsClickOptions = {onClick:(evt,elements)=>{
+            if (!elements.length) return;
+            const mode = Object.keys(ecsTotals)[elements[0].index];
+            const rows = residences.filter((r)=>r.modeECS && String(r.modeECS).trim()===mode);
+            toggleChartPanel('ecs', mode, {title:'Résidences en ECS « '+mode+' » ('+rows.length+')', rows, renderRow:ensemblePctResRow(onSelectResidence, mode)});
+          }};
+          return (
+            <div className="ce-card">
+              <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700,marginBottom:12}}>Mode de production ECS (logements)</h2>
+              {Object.keys(ecsTotals).length>6 ? (
+                <ChartCanvas type="bar" height={Math.max(220, Object.keys(ecsTotals).length*26)} data={{
+                  labels: Object.keys(ecsTotals), datasets:[{data:Object.values(ecsTotals), backgroundColor:'#FF8364', borderRadius:4}]
+                }} options={Object.assign({indexAxis:'y', plugins:{legend:{display:false}}, scales:{x:{beginAtZero:true}}}, ecsClickOptions)} />
+              ) : (
+                <ChartCanvas type="doughnut" height={220} data={{
+                  labels: Object.keys(ecsTotals), datasets:[{data:Object.values(ecsTotals), backgroundColor: Object.keys(ecsTotals).map((_,i)=>PALETTE[i%PALETTE.length])}]
+                }} options={ecsClickOptions} />
+              )}
+              {chartPanel && chartPanel.chart==='ecs' && <ResidenceListPanel title={chartPanel.title} rows={chartPanel.rows} renderRow={chartPanel.renderRow} onClose={()=>setChartPanel(null)} maxHeight={240} />}
+            </div>
+          );
+        })()}
         {hasFinancement && (
           <div className="ce-card">
             <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700,marginBottom:12}}>Répartition par financement (logements)</h2>
             <ChartCanvas type="doughnut" height={220} data={{
               labels: Object.keys(financementTotals),
               datasets:[{data:Object.values(financementTotals), backgroundColor: Object.keys(financementTotals).map((_,i)=>PALETTE[i%PALETTE.length])}]
-            }} />
+            }} options={{onClick:(evt,elements)=>{
+              if (!elements.length) return;
+              const value = Object.keys(financementTotals)[elements[0].index];
+              const rows = residences.filter((r)=>r.financement && String(r.financement).trim()===value);
+              toggleChartPanel('financement', value, {title:'Résidences « '+value+' » ('+rows.length+')', rows, renderRow:ensemblePctResRow(onSelectResidence, value)});
+            }}} />
+            {chartPanel && chartPanel.chart==='financement' && <ResidenceListPanel title={chartPanel.title} rows={chartPanel.rows} renderRow={chartPanel.renderRow} onClose={()=>setChartPanel(null)} maxHeight={240} />}
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+/* ---------------- Panneau de liste de résidences au clic (segmentation, impact, pivot) ---------------- */
+// Composant partagé par les 3 panneaux "en ligne" ouverts au clic sur une cellule/famille/barre
+// (jamais un tiroir latéral ni une modale) : Segmentation en 9 familles, Impact des actions
+// stratégiques, drill-down du pivot. `title`/`headerActions`/`onClose` sont optionnels : sans eux,
+// aucun en-tête n'est rendu (cas des blocs "Parc à traiter"/"Résidences non projetées" de l'Impact,
+// qui listent directement leurs résidences sans titre ni bouton propres).
+function ResidenceListPanel({title, headerActions, rows, renderRow, onClose, maxHeight, marginTop, children}){
+  return (
+    <div style={{border:'1px solid #eef4f2',borderRadius:8,padding:'10px 14px',maxHeight:maxHeight||280,overflowY:'auto',marginTop:marginTop!==undefined?marginTop:12}}>
+      {(title || headerActions || onClose) && (
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8,marginBottom:8}}>
+          <div style={{fontSize:'.78rem',fontWeight:700,color:'var(--ce-vert-tres-fonce)'}}>{title}</div>
+          <div style={{display:'flex',alignItems:'center',gap:8}}>
+            {headerActions}
+            {onClose && <button onClick={onClose} style={{background:'none',border:'none',cursor:'pointer',color:'var(--ce-vert-fonce)',fontSize:'.9rem'}}>×</button>}
+          </div>
+        </div>
+      )}
+      {children}
+      {rows.length===0 && <div style={{fontSize:'.76rem',color:'#9fb3ae'}}>Aucun élément.</div>}
+      {rows.slice(0,200).map((row,i)=><React.Fragment key={i}>{renderRow(row)}</React.Fragment>)}
+      {rows.length>200 && <div style={{fontSize:'.7rem',color:'#9fb3ae',marginTop:6}}>… et {rows.length-200} de plus (affinez les filtres transverses).</div>}
     </div>
   );
 }
@@ -2377,16 +2623,36 @@ function SegmentationGrid({residences, operations, gainsGrid, includeIdentifiees
           </div>
         </div>
 
-        <div style={{flex:1,minWidth:220,border:'1px solid #eef4f2',borderRadius:8,padding:'10px 14px',maxHeight:320,overflowY:'auto'}}>
-          {!pinned && <div style={{fontSize:'.78rem',color:'#9fb3ae'}}>Cliquez sur une famille pour voir la liste des résidences concernées.</div>}
+        <div style={{flex:1,minWidth:220}}>
+          {!pinned && (
+            <div style={{border:'1px solid #eef4f2',borderRadius:8,padding:'10px 14px',maxHeight:320,overflowY:'auto',fontSize:'.78rem',color:'#9fb3ae'}}>
+              Cliquez sur une famille pour voir la liste des résidences concernées.
+            </div>
+          )}
           {pinned && (
-            <React.Fragment>
-              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8,marginBottom:8}}>
-                <div style={{fontSize:'.78rem',fontWeight:700,color:'var(--ce-vert-tres-fonce)'}}>
-                  {yLabel} : {pinned.yBand} · {xLabel} : {pinned.xBand} — {pinnedMembers.length} résidence{pinnedMembers.length>1?'s':''}
-                </div>
-                <button className="ce-btn-outline ce-btn-sm" onClick={()=>setShowDpeBreakdown((v)=>!v)}>{showDpeBreakdown? 'Masquer répartition DPE' : 'Répartition DPE'}</button>
-              </div>
+            <ResidenceListPanel
+              title={yLabel+' : '+pinned.yBand+' · '+xLabel+' : '+pinned.xBand+' — '+pinnedMembers.length+' résidence'+(pinnedMembers.length>1?'s':'')}
+              headerActions={<button className="ce-btn-outline ce-btn-sm" onClick={()=>setShowDpeBreakdown((v)=>!v)}>{showDpeBreakdown? 'Masquer répartition DPE' : 'Répartition DPE'}</button>}
+              rows={pinnedMembers}
+              maxHeight={320}
+              marginTop={0}
+              renderRow={(r)=>{
+                const travaux = residenceTravauxLabels(r, operations, includeIdentifiees);
+                const realizedFamilies = year!==null ? realizedFamiliesForYear(r, operations, year, includeIdentifiees) : {};
+                return (
+                  <div onClick={()=>onSelectResidence && onSelectResidence(r)} style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:8,fontSize:'.76rem',color:'var(--ce-vert-fonce)',padding:'3px 0',borderBottom:'1px solid #f0f5f3',cursor:onSelectResidence?'pointer':'default'}}>
+                    <span>{r.nom || r.code} <span style={{color:'#9fb3ae'}}>— {fmtNum(r.nbLgt)} lgt{travaux.length>0? ' ('+travaux.join(', ')+')' : ''}</span></span>
+                    <span style={{display:'flex',gap:5,alignItems:'center',flexShrink:0}}>
+                      {Object.keys(realizedFamilies).map((fam)=>(
+                        <span key={fam} title={fam+' réalisé en '+realizedFamilies[fam]} style={{display:'flex',alignItems:'center',gap:2,fontSize:'.62rem',fontWeight:700,color:'var(--ce-vert-principal)',background:'#e7f5ee',borderRadius:8,padding:'1px 6px'}}>✓ {fam}</span>
+                      ))}
+                      <DpeBadge cl={worstPresentClass(r.distEnergie)} />
+                      <DpeBadge cl={worstPresentClass(r.distGES)} />
+                    </span>
+                  </div>
+                );
+              }}
+            >
               {showDpeBreakdown && pinnedBreakdown && (
                 <div style={{marginBottom:10,padding:'8px 0',borderBottom:'1px solid #f0f5f3'}}>
                   {[['Énergie','distE'],['GES','distG']].map(([label,dk])=>(
@@ -2402,24 +2668,7 @@ function SegmentationGrid({residences, operations, gainsGrid, includeIdentifiees
                   ))}
                 </div>
               )}
-              {pinnedMembers.length===0 && <div style={{fontSize:'.76rem',color:'#9fb3ae'}}>Aucune résidence.</div>}
-              {pinnedMembers.map((r)=>{
-                const travaux = residenceTravauxLabels(r, operations, includeIdentifiees);
-                const realizedFamilies = year!==null ? realizedFamiliesForYear(r, operations, year, includeIdentifiees) : {};
-                return (
-                  <div key={r.code} onClick={()=>onSelectResidence && onSelectResidence(r)} style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:8,fontSize:'.76rem',color:'var(--ce-vert-fonce)',padding:'3px 0',borderBottom:'1px solid #f0f5f3',cursor:onSelectResidence?'pointer':'default'}}>
-                    <span>{r.nom || r.code} <span style={{color:'#9fb3ae'}}>— {fmtNum(r.nbLgt)} lgt{travaux.length>0? ' ('+travaux.join(', ')+')' : ''}</span></span>
-                    <span style={{display:'flex',gap:5,alignItems:'center',flexShrink:0}}>
-                      {Object.keys(realizedFamilies).map((fam)=>(
-                        <span key={fam} title={fam+' réalisé en '+realizedFamilies[fam]} style={{display:'flex',alignItems:'center',gap:2,fontSize:'.62rem',fontWeight:700,color:'var(--ce-vert-principal)',background:'#e7f5ee',borderRadius:8,padding:'1px 6px'}}>✓ {fam}</span>
-                      ))}
-                      <DpeBadge cl={worstPresentClass(r.distEnergie)} />
-                      <DpeBadge cl={worstPresentClass(r.distGES)} />
-                    </span>
-                  </div>
-                );
-              })}
-            </React.Fragment>
+            </ResidenceListPanel>
           )}
         </div>
       </div>
@@ -2717,8 +2966,12 @@ function ImpactActionsStrategiques({residences, operations, includeIdentifiees, 
   function renderGrid(which, title){
     const cells = gridsByKey[which].cells;
     const showDelta = which!=='base' && compareState.base && !!base;
+    // flex:'0 0 auto' (au lieu de flex:1) : le conteneur épouse la largeur réelle de la grille
+    // (98px + 3×116px) plutôt que de s'étirer sur toute la largeur de sa ligne flex — sans quoi le
+    // titre, centré sur tout le conteneur, se retrouve centré au-dessus du vide quand la grille ne
+    // remplit pas sa ligne (cf. justifyContent:'center' sur les lignes qui appellent renderGrid).
     return (
-      <div style={{flex:1,minWidth:280}}>
+      <div style={{flex:'0 0 auto'}}>
         <div style={{fontSize:'.78rem',fontWeight:700,color:'var(--ce-vert-tres-fonce)',marginBottom:8,textAlign:'center'}}>{title}</div>
         <div style={{display:'grid',gridTemplateColumns:'98px repeat(3, 116px)',gap:4}}>
           <div></div>
@@ -2807,22 +3060,30 @@ function ImpactActionsStrategiques({residences, operations, includeIdentifiees, 
         if (visible.length===3){
           return (
             <React.Fragment>
-              <div style={{display:'flex',gap:24,flexWrap:'wrap',marginBottom:14}}>
+              <div style={{display:'flex',gap:24,flexWrap:'wrap',justifyContent:'center',marginBottom:14}}>
                 {renderGrid('base', titles.base)}
                 {renderGrid('actuel', titles.actuel)}
               </div>
-              <div style={{display:'flex',gap:24,flexWrap:'wrap',marginBottom:14}}>
+              <div style={{display:'flex',gap:24,flexWrap:'wrap',justifyContent:'center',marginBottom:14}}>
                 {renderGrid('cible', titles.cible)}
               </div>
             </React.Fragment>
           );
         }
         return (
-          <div style={{display:'flex',gap:24,flexWrap:'wrap',marginBottom:14}}>
+          <div style={{display:'flex',gap:24,flexWrap:'wrap',justifyContent:'center',marginBottom:14}}>
             {visible.map((which)=>renderGrid(which, titles[which]))}
           </div>
         );
       })()}
+
+      <p style={{fontSize:'.7rem',color:'var(--ce-vert-fonce)',marginTop:-4,marginBottom:14,lineHeight:1.5}}>
+        Chaque grille croise 3 niveaux d'État technique (lignes) × 3 niveaux de DPE Global (colonnes),
+        soit 9 familles — la couleur de fond suit une palette rouge (Mauvais état × DPE Performant -,
+        pire cas) → vert (Bon état × Performant +, meilleur cas), du rouge au vert en passant par
+        l'orange/jaune pour les familles intermédiaires. Cliquez sur une cellule pour voir le détail
+        des résidences concernées.
+      </p>
 
       <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:14}}>
         <div className="ce-card" style={{flex:1,minWidth:220,cursor:'pointer',border: (pinned && pinned.which==='parcATraiter') ? '2px solid var(--ce-corail)' : '1px solid #eef4f2'}}
@@ -2848,68 +3109,73 @@ function ImpactActionsStrategiques({residences, operations, includeIdentifiees, 
         )}
       </div>
 
-      {pinned && (
-        <div style={{border:'1px solid #eef4f2',borderRadius:8,padding:'10px 14px',maxHeight:280,overflowY:'auto',marginBottom:12}}>
-          {pinned.which==='parcATraiter' && (parcATraiterRes.length===0 ? <div style={{fontSize:'.76rem',color:'#9fb3ae'}}>Aucune résidence.</div> : parcATraiterRes.map((r)=>residenceRow(r, 'cible')))}
-          {pinned.which==='nonProjetees' && nonProjetees.map((r)=>residenceRow(r, 'cible'))}
-          {gridsByKey[pinned.which] && (()=>{
-            const k = pinned.tb+'|'+pinned.db;
-            const curCell = gridsByKey[pinned.which].cells[k];
-            const refCell = base ? base.cells[k] : null; // référence pour l'évolution, seulement si Base existe
-            const showDeltaHere = pinned.which!=='base' && !!refCell;
-            // Totaux Réhab./RC/Démol./Vente de la famille sélectionnée (nb de logements), affichés ici
-            // à côté du nom de la famille — pas dans la cellule de la grille (trop dense, cf. retour).
-            const familyCounters = cellCounters(pinnedGridMembers, operations, includeIdentifiees);
-            const travauxParts = [
-              dataAvailability.rehab && ('Réhab '+fmtNum(familyCounters.rehab)),
-              dataAvailability.rc && ('RC '+fmtNum(familyCounters.rc)),
-              dataAvailability.demolition && ('Démol '+fmtNum(familyCounters.demolition)),
-              dataAvailability.vente && ('Vente '+fmtNum(familyCounters.vente)),
-            ].filter(Boolean);
-            return (
-              <React.Fragment>
-                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8,marginBottom:4}}>
-                  <div style={{fontSize:'.78rem',fontWeight:700,color:'var(--ce-vert-tres-fonce)'}}>
-                    {pinned.tb} × {pinned.db} ({IMPACT_GRID_LABELS[pinned.which]}) — {pinnedGridMembers.length} résidence{pinnedGridMembers.length>1?'s':''}
-                  </div>
-                  <button className="ce-btn-outline ce-btn-sm" onClick={()=>setShowDpeBreakdown((v)=>!v)}>{showDpeBreakdown? 'Masquer répartition DPE' : 'Répartition DPE'}</button>
-                </div>
-                {travauxParts.length>0 && (
-                  <div style={{fontSize:'.72rem',color:'var(--ce-vert-fonce)',marginBottom:8}}>{travauxParts.join(' · ')}</div>
-                )}
-                {showDpeBreakdown && (
-                  <div style={{marginBottom:10,padding:'8px 0',borderBottom:'1px solid #f0f5f3'}}>
-                    {[['Énergie','distE'],['GES','distG']].map(([label,dk])=>(
-                      <div key={dk} style={{display:'flex',alignItems:'center',gap:6,marginBottom:6,flexWrap:'wrap'}}>
-                        <span style={{width:56,fontSize:'.68rem',fontWeight:700,color:'var(--ce-vert-fonce)'}}>{label}</span>
-                        {['A','B','C','D','E','F','G'].map((cl)=>{
-                          const cur = (curCell[dk][cl]||0);
-                          const ref = refCell ? (refCell[dk][cl]||0) : 0;
-                          let deltaLabel = null;
-                          if (showDeltaHere){
-                            if (ref>0){ const pct=Math.round((cur-ref)/ref*100); deltaLabel=(pct>=0?'+':'')+pct+'%'; }
-                            else if (cur>0){ deltaLabel='nouveau'; }
-                          }
-                          return (
-                            <span key={cl} style={{display:'flex',flexDirection:'column',alignItems:'center',gap:1}}>
-                              <DpeBadge cl={cl} />
-                              <span style={{fontSize:'.6rem',color: deltaLabel? (deltaLabel.startsWith('-')?'var(--ce-corail)':'var(--ce-vert-principal)') : 'var(--ce-vert-fonce)'}}>
-                                {fmtNum(cur)}{deltaLabel? ' ('+deltaLabel+')' : ''}
-                              </span>
-                            </span>
-                          );
-                        })}
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {pinnedGridMembers.length===0 && <div style={{fontSize:'.76rem',color:'#9fb3ae'}}>Aucune résidence.</div>}
-                {pinnedGridMembers.map((r)=>residenceRow(r, pinned.which))}
-              </React.Fragment>
-            );
-          })()}
+      {pinned && pinned.which==='parcATraiter' && (
+        <div style={{marginBottom:12}}>
+          <ResidenceListPanel rows={parcATraiterRes} renderRow={(r)=>residenceRow(r,'cible')} maxHeight={280} marginTop={0} />
         </div>
       )}
+      {pinned && pinned.which==='nonProjetees' && (
+        <div style={{marginBottom:12}}>
+          <ResidenceListPanel rows={nonProjetees} renderRow={(r)=>residenceRow(r,'cible')} maxHeight={280} marginTop={0} />
+        </div>
+      )}
+      {pinned && gridsByKey[pinned.which] && (()=>{
+        const k = pinned.tb+'|'+pinned.db;
+        const curCell = gridsByKey[pinned.which].cells[k];
+        const refCell = base ? base.cells[k] : null; // référence pour l'évolution, seulement si Base existe
+        const showDeltaHere = pinned.which!=='base' && !!refCell;
+        // Totaux Réhab./RC/Démol./Vente de la famille sélectionnée (nb de logements), affichés ici
+        // à côté du nom de la famille — pas dans la cellule de la grille (trop dense, cf. retour).
+        const familyCounters = cellCounters(pinnedGridMembers, operations, includeIdentifiees);
+        const travauxParts = [
+          dataAvailability.rehab && ('Réhab '+fmtNum(familyCounters.rehab)),
+          dataAvailability.rc && ('RC '+fmtNum(familyCounters.rc)),
+          dataAvailability.demolition && ('Démol '+fmtNum(familyCounters.demolition)),
+          dataAvailability.vente && ('Vente '+fmtNum(familyCounters.vente)),
+        ].filter(Boolean);
+        return (
+          <div style={{marginBottom:12}}>
+            <ResidenceListPanel
+              title={pinned.tb+' × '+pinned.db+' ('+IMPACT_GRID_LABELS[pinned.which]+') — '+pinnedGridMembers.length+' résidence'+(pinnedGridMembers.length>1?'s':'')}
+              headerActions={<button className="ce-btn-outline ce-btn-sm" onClick={()=>setShowDpeBreakdown((v)=>!v)}>{showDpeBreakdown? 'Masquer répartition DPE' : 'Répartition DPE'}</button>}
+              rows={pinnedGridMembers}
+              renderRow={(r)=>residenceRow(r, pinned.which)}
+              maxHeight={280}
+              marginTop={0}
+            >
+              {travauxParts.length>0 && (
+                <div style={{fontSize:'.72rem',color:'var(--ce-vert-fonce)',marginBottom:8}}>{travauxParts.join(' · ')}</div>
+              )}
+              {showDpeBreakdown && (
+                <div style={{marginBottom:10,padding:'8px 0',borderBottom:'1px solid #f0f5f3'}}>
+                  {[['Énergie','distE'],['GES','distG']].map(([label,dk])=>(
+                    <div key={dk} style={{display:'flex',alignItems:'center',gap:6,marginBottom:6,flexWrap:'wrap'}}>
+                      <span style={{width:56,fontSize:'.68rem',fontWeight:700,color:'var(--ce-vert-fonce)'}}>{label}</span>
+                      {['A','B','C','D','E','F','G'].map((cl)=>{
+                        const cur = (curCell[dk][cl]||0);
+                        const ref = refCell ? (refCell[dk][cl]||0) : 0;
+                        let deltaLabel = null;
+                        if (showDeltaHere){
+                          if (ref>0){ const pct=Math.round((cur-ref)/ref*100); deltaLabel=(pct>=0?'+':'')+pct+'%'; }
+                          else if (cur>0){ deltaLabel='nouveau'; }
+                        }
+                        return (
+                          <span key={cl} style={{display:'flex',flexDirection:'column',alignItems:'center',gap:1}}>
+                            <DpeBadge cl={cl} />
+                            <span style={{fontSize:'.6rem',color: deltaLabel? (deltaLabel.startsWith('-')?'var(--ce-corail)':'var(--ce-vert-principal)') : 'var(--ce-vert-fonce)'}}>
+                              {fmtNum(cur)}{deltaLabel? ' ('+deltaLabel+')' : ''}
+                            </span>
+                          </span>
+                        );
+                      })}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </ResidenceListPanel>
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -3017,6 +3283,12 @@ function ViewCotation({residences, onSelectResidence, operations, includeIdentif
               if (series && series.key!=='base' && series.data[el.index]) onSelectResidence(series.data[el.index].res);
             }
           }} />
+          <p style={{fontSize:'.7rem',color:'var(--ce-vert-fonce)',marginTop:10,lineHeight:1.5}}>
+            Chaque bulle est une résidence : sa position horizontale suit sa note d'Attractivité, sa
+            position verticale sa note d'État technique (les deux ramenées sur 0-100) — et sa taille
+            est proportionnelle à son nombre de logements. Cliquez sur une bulle Actuel ou Cible pour
+            ouvrir la fiche résidence (Base est un instantané figé, non cliquable).
+          </p>
         </div>
       )}
       <SegmentationGrid residences={residences} operations={operations} gainsGrid={gainsGrid} includeIdentifiees={includeIdentifiees} baseImport={baseImport} onSelectResidence={onSelectResidence} />
@@ -3141,6 +3413,20 @@ function typeCategorie(type){
 // (Réhabilitation/RC/Chgt de vecteur/Démolition) déjà utilisées dans le même graphique empilé.
 const BUDGET_LIGNE_COLORS = ['#F8C6BA','#9fb3ae','#B79CED','#FFD16A','#6BC9C0','#E6A4B4'];
 function sumBudgetLignesYear(lignes, y){ return (lignes||[]).reduce((s,l)=>s+(Number((l.valeurs||{})[y])||0),0); }
+// §5.3 — badge/delta "Vs Base" d'une opération, factorisé pour être réutilisé tel quel par la colonne
+// du tableau des opérations ET par le panneau ouvert au clic sur "Évolution des investissements"
+// (§Phase 4) plutôt que d'en recoder une variante.
+function renderEcartBadge(o, ecartByOpId){
+  const m = ecartByOpId[o.id];
+  if (!m) return <span title="Absente de la base" style={{fontSize:'.66rem',fontWeight:700,color:'var(--ce-corail)',background:'#fff1ec',borderRadius:10,padding:'1px 6px',whiteSpace:'nowrap'}}>Nouvelle</span>;
+  const noEcart = (!m.deltaAnnees || m.deltaAnnees===0) && (!m.deltaMontant || m.deltaMontant===0);
+  const title = 'Base : '+(m.baseOp.annee ?? '—')+' · '+fmtEur(m.baseOp.montant);
+  if (noEcart) return <span title={title} style={{fontSize:'.72rem',color:'#9fb3ae'}}>=</span>;
+  const parts = [];
+  if (m.deltaAnnees) parts.push((m.deltaAnnees>=0?'+':'')+m.deltaAnnees+'a');
+  if (m.deltaPct!=null && m.deltaPct!==0) parts.push((m.deltaPct>=0?'+':'')+m.deltaPct.toFixed(0)+'%');
+  return <span title={title} style={{fontSize:'.72rem',fontWeight:700,color:'var(--ce-corail)',whiteSpace:'nowrap'}}>{parts.join(' ')}</span>;
+}
 function ViewInvestissements({residences, operations, setOperations, includeIdentifiees, setIncludeIdentifiees, budgetLignes, setBudgetLignes, gainsGrid, isModified, onReset, baseImport, onSelectResidence}){
   const [search, setSearch] = useState('');
   const [compare, setCompare] = useState(defaultCompareState());
@@ -3315,6 +3601,19 @@ function ViewInvestissements({residences, operations, setOperations, includeIden
   // Colonnes resserrées : largeurs explicites + mode `dense` du tableau (padding réduit, cf.
   // ce-table-dense) pour compenser l'ajout de la colonne "Vs Base" sans faire disparaître le contenu
   // essentiel (nature des travaux, année) qui doit rester lisible sans troncature.
+  // Panneau ouvert au clic sur une barre de "Évolution des investissements" (§Phase 4) : un clic
+  // isole une année + une famille — le "Base ou Actuel" de la barre cliquée ne change que la donnée
+  // lue pour resoudre l'année/famille, la liste affichée reste toujours les opérations Actuel (colonne
+  // Vs Base déjà réutilisée, cf. renderEcartBadge) puisque les opérations "disparues" n'ont justement
+  // pas de ligne côté Actuel — confirmé avec Jules.
+  const [investPanel, setInvestPanel] = useState(null); // {year, famille, title, rows}
+  function toggleInvestPanel(year, famille){
+    setInvestPanel((cur)=> (cur && cur.year===year && cur.famille===famille) ? null : (()=>{
+      const rows = visibleOps.filter((o)=>o.annee===year && familyOfType(o.type)===famille);
+      return { year, famille, title: famille+' — '+year+' ('+rows.length+' opération'+(rows.length>1?'s':'')+')', rows };
+    })());
+  }
+
   const opsCols = [
     {key:'_fiche', label:'', render:(o)=>{
       const r = resByCode[o.resCode];
@@ -3380,17 +3679,7 @@ function ViewInvestissements({residences, operations, setOperations, includeIden
     // §5.3 — écart vs Base intégré directement dans le tableau des opérations (colonne dédiée), plutôt
     // qu'un tableau séparé : chaque ligne reste éditable normalement, cette colonne n'est qu'une lecture.
     // Contenu volontairement court (détail complet en info-bulle) pour ne pas élargir le tableau.
-    {key:'_ecartBase', label:'Vs Base', render:(o)=>{
-      const m = ecartByOpId[o.id];
-      if (!m) return <span title="Absente de la base" style={{fontSize:'.66rem',fontWeight:700,color:'var(--ce-corail)',background:'#fff1ec',borderRadius:10,padding:'1px 6px',whiteSpace:'nowrap'}}>Nouvelle</span>;
-      const noEcart = (!m.deltaAnnees || m.deltaAnnees===0) && (!m.deltaMontant || m.deltaMontant===0);
-      const title = 'Base : '+(m.baseOp.annee ?? '—')+' · '+fmtEur(m.baseOp.montant);
-      if (noEcart) return <span title={title} style={{fontSize:'.72rem',color:'#9fb3ae'}}>=</span>;
-      const parts = [];
-      if (m.deltaAnnees) parts.push((m.deltaAnnees>=0?'+':'')+m.deltaAnnees+'a');
-      if (m.deltaPct!=null && m.deltaPct!==0) parts.push((m.deltaPct>=0?'+':'')+m.deltaPct.toFixed(0)+'%');
-      return <span title={title} style={{fontSize:'.72rem',fontWeight:700,color:'var(--ce-corail)',whiteSpace:'nowrap'}}>{parts.join(' ')}</span>;
-    }},
+    {key:'_ecartBase', label:'Vs Base', render:(o)=>renderEcartBadge(o, ecartByOpId)},
   ] : []).concat([
     {key:'_actions', label:'', render:(o)=><button className="ce-btn-outline ce-btn-sm" onClick={()=>deleteOp(o.id)}>Suppr.</button>},
   ]);
@@ -3436,12 +3725,40 @@ function ViewInvestissements({residences, operations, setOperations, includeIden
               datasetIndex: families.length, colorPos:'#FF8364', colorNeg:'#009261', // = --ce-corail / --ce-vert-principal (Canvas n'accepte pas var(--x))
             } } : {}),
           },
+          onClick:(evt,elements)=>{
+            if (!elements.length) return;
+            const el = elements[0];
+            const year = years[el.index];
+            const nBaseSets = baseAggregation ? families.length : 0;
+            // Les datasets des lignes budgétaires libres (après les 2 blocs familles) n'ont pas
+            // d'opération associée (montant saisi à la main, pas un import) : clic sans effet.
+            const famille = el.datasetIndex<nBaseSets ? families[el.datasetIndex]
+              : (el.datasetIndex-nBaseSets)<families.length ? families[el.datasetIndex-nBaseSets] : null;
+            if (famille) toggleInvestPanel(year, famille);
+          },
         }} />
+        <p style={{fontSize:'.7rem',color:'var(--ce-vert-fonce)',marginTop:8,lineHeight:1.5}}>
+          Chaque barre empile le montant des opérations par famille de travaux (Réhabilitation, Remplacement
+          de composants, Changement de vecteur, Démolition), plus une éventuelle ligne budgétaire libre
+          (montant non ventilé par opération).{baseAggregation? ' Quand une Base est chargée, une 2ème barre en teinte pâle (même couleur par famille) apparaît à côté — cliquer sur l\'une ou l\'autre ouvre le détail des opérations de cette année et cette famille.' : ' Cliquer sur un segment ouvre le détail des opérations de cette année et cette famille.'}
+        </p>
         {baseAggregation && (
           <div style={{fontSize:'.68rem',color:'var(--ce-vert-fonce)',marginTop:4,display:'flex',alignItems:'center',gap:6}}>
             <span style={{display:'inline-block',width:12,height:12,borderRadius:3,background:hexToRgba(famColors['Réhabilitation'],0.35)}}></span>
             Teinte pâle = Base « {baseImport.nom} » — % sous chaque barre = écart Actuel vs Base
           </div>
+        )}
+        {investPanel && (
+          <ResidenceListPanel title={investPanel.title} rows={investPanel.rows} onClose={()=>setInvestPanel(null)}
+            renderRow={(o)=>{
+              const r = resByCode[o.resCode];
+              return (
+                <div onClick={()=>r && onSelectResidence && onSelectResidence(r)} style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8,fontSize:'.76rem',color:'var(--ce-vert-fonce)',padding:'3px 0',borderBottom:'1px solid #f0f5f3',cursor:(r&&onSelectResidence)?'pointer':'default'}}>
+                  <span>{(r&&r.nom)||o.resCode||'—'} <span style={{color:'#9fb3ae'}}>— {o.nature||o.type||'Non renseigné'} · {o.annee} · {fmtEur(o.montant)}</span></span>
+                  {hasCompareBase && renderEcartBadge(o, ecartByOpId)}
+                </div>
+              );
+            }} />
         )}
       </div>
 
@@ -3470,6 +3787,12 @@ function ViewInvestissements({residences, operations, setOperations, includeIden
           ]
         }} options={{ scales:{ y:{ beginAtZero:true, ticks:{callback:(v)=>fmtKEur(v)} } },
           plugins:{ tooltip:{ callbacks:{ label:(ctx)=> ctx.dataset.label+': '+fmtEur(ctx.raw) } } } }} />
+        <p style={{fontSize:'.7rem',color:'var(--ce-vert-fonce)',marginTop:10,lineHeight:1.5}}>
+          Base = budget de la version sauvegardée comparée ; Actuel = budget déjà réalisé jusqu'à l'année
+          en cours (ligne interrompue au-delà) ; Cible = budget de la trajectoire simulée jusqu'à son terme.
+          Le Δ ci-dessus mesure l'écart de budget total entre Actuel/Cible et Base — positif si le plan
+          simulé a plus dépensé/prévu que la Base.
+        </p>
       </div>
 
       <div className="ce-card">
@@ -3586,11 +3909,25 @@ function classRangeAG(lo, hi){
   if (i1===-1 || i2===-1) return [];
   return CLASS_ORDER_AG.slice(Math.min(i1,i2), Math.max(i1,i2)+1);
 }
-function ViewDecarbonation({residences, operations, gainsGrid, hasGainsGrid, includeIdentifiees, baseImport}){
+function ViewDecarbonation({residences, operations, gainsGrid, hasGainsGrid, includeIdentifiees, baseImport, onSelectResidence}){
   const [metric, setMetric] = useState('energie');
   const [compare, setCompare] = useState(defaultCompareState());
   const years = useMemo(()=>computeYearsRange(operations), [operations]);
   const classes = ['A','B','C','D','E','F','G','NR'];
+  // Panneau ouvert au clic sur la trajectoire empilée ou le avant/après (§3 — un clic isole une
+  // année + une classe DPE) : `source` distingue sous quel graphique l'afficher, `computeTrajectoryByResidence`
+  // (déjà utilisé par le tableau Impact des actions stratégiques pour la même problématique) donne la
+  // distribution DPE résidence par résidence à cette échéance, sans recalculer de projection ad hoc.
+  const [trajPanel, setTrajPanel] = useState(null); // {source, year, cl, title, rows, renderRow}
+  function buildTrajPanel(source, year, cl){
+    const { state, alive } = computeTrajectoryByResidence(residences, operations, gainsGrid, year, metric, includeIdentifiees);
+    const getCount = (r)=> (alive[r.code] && state[r.code] && state[r.code][cl]) || 0;
+    const rows = residences.filter((r)=>getCount(r)>0);
+    return { source, year, cl, title:'Résidences en classe '+cl+' en '+year+' ('+rows.length+')', rows, renderRow: ensembleFractionRow(onSelectResidence, getCount, 'classe '+cl) };
+  }
+  function toggleTrajPanel(source, year, cl){
+    setTrajPanel((cur)=> (cur && cur.year===year && cur.cl===cl) ? null : buildTrajPanel(source, year, cl));
+  }
 
   const trajectory = useMemo(()=>{
     if (!hasGainsGrid) return null;
@@ -3716,12 +4053,21 @@ function ViewDecarbonation({residences, operations, gainsGrid, hasGainsGrid, inc
                 <button className={metric==='ges'?'ce-btn ce-btn-sm':'ce-btn-outline ce-btn-sm'} onClick={()=>setMetric('ges')}>GES</button>
               </div>
             </div>
-            <ChartCanvas type="bar" height={340} data={{
-              labels: years,
-              datasets: classes.filter((c)=>years.some((y)=>trajectory[y][c]>0)).map((c)=>({
-                label:c, data: years.map((y)=>trajectory[y][c]||0), backgroundColor: DPE_COLORS[c], stack:'s'
-              }))
-            }} options={{ scales:{ x:{stacked:true}, y:{stacked:true, title:{display:true,text:'Logements'}} } }} />
+            {(()=>{
+              const visibleClasses = classes.filter((c)=>years.some((y)=>trajectory[y][c]>0));
+              return (
+                <ChartCanvas type="bar" height={340} data={{
+                  labels: years,
+                  datasets: visibleClasses.map((c)=>({
+                    label:c, data: years.map((y)=>trajectory[y][c]||0), backgroundColor: DPE_COLORS[c], stack:'s'
+                  }))
+                }} options={{ scales:{ x:{stacked:true}, y:{stacked:true, title:{display:true,text:'Logements'}} }, onClick:(evt,elements)=>{
+                  if (!elements.length) return;
+                  const el = elements[0];
+                  toggleTrajPanel('trajectoire', years[el.index], visibleClasses[el.datasetIndex]);
+                }}} />
+              );
+            })()}
             <p style={{fontSize:'.7rem',color:'var(--ce-vert-fonce)',marginTop:10,lineHeight:1.5}}>
               Méthodologie (§8.2 du cahier des charges) : chaque résidence part de sa distribution DPE constatée ;
               chaque opération programmée (ou identifiée si incluse) applique le gain de la grille de référence à la classe
@@ -3729,6 +4075,7 @@ function ViewDecarbonation({residences, operations, gainsGrid, hasGainsGrid, inc
               du parc à compter de l'année concernée. Simplification V1 : le gain s'applique à l'ensemble du parc de la
               résidence, pas uniquement aux logements concernés par l'opération.
             </p>
+            {trajPanel && trajPanel.source==='trajectoire' && <ResidenceListPanel title={trajPanel.title} rows={trajPanel.rows} renderRow={trajPanel.renderRow} onClose={()=>setTrajPanel(null)} />}
           </div>
           <div className="ce-card">
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:10,marginBottom:12}}>
@@ -3745,20 +4092,35 @@ function ViewDecarbonation({residences, operations, gainsGrid, hasGainsGrid, inc
                 </select>
               </div>
             </div>
-            <ChartCanvas type="bar" height={300} data={{
-              // `final` peut être momentanément null le temps que l'effet ci-dessus fixe `repartYear`
-              // au tout premier rendu (même garde que `dpeCardShare` plus haut) : (final||{})[c] évite
-              // un crash "Cannot read properties of null" à ce moment précis.
-              labels: classes.filter((c)=>(initial[c]||0)>0 || ((final||{})[c]||0)>0),
-              datasets: [
-                { label:'Avant intervention', data: classes.filter((c)=>(initial[c]||0)>0 || ((final||{})[c]||0)>0).map((c)=>initial[c]||0), backgroundColor:'#9fb3ae' },
-                { label:'Après intervention', data: classes.filter((c)=>(initial[c]||0)>0 || ((final||{})[c]||0)>0).map((c)=>(final||{})[c]||0), backgroundColor: classes.filter((c)=>(initial[c]||0)>0 || ((final||{})[c]||0)>0).map((c)=>DPE_COLORS[c]) },
-              ]
-            }} options={{ scales:{ y:{ title:{display:true,text:'Logements'} } } }} />
+            {(()=>{
+              const repartLabels = classes.filter((c)=>(initial[c]||0)>0 || ((final||{})[c]||0)>0);
+              return (
+                <ChartCanvas type="bar" height={300} data={{
+                  // `final` peut être momentanément null le temps que l'effet ci-dessus fixe `repartYear`
+                  // au tout premier rendu (même garde que `dpeCardShare` plus haut) : (final||{})[c] évite
+                  // un crash "Cannot read properties of null" à ce moment précis.
+                  labels: repartLabels,
+                  datasets: [
+                    { label:'Avant intervention', data: repartLabels.map((c)=>initial[c]||0), backgroundColor:'#9fb3ae' },
+                    { label:'Après intervention', data: repartLabels.map((c)=>(final||{})[c]||0), backgroundColor: repartLabels.map((c)=>DPE_COLORS[c]) },
+                  ]
+                }} options={{ scales:{ y:{ title:{display:true,text:'Logements'} } }, onClick:(evt,elements)=>{
+                  if (!elements.length || final===null) return;
+                  const el = elements[0];
+                  const cl = repartLabels[el.index];
+                  // Le clic sur "Avant" utilise years[0] (distribution constatée à l'import), sur
+                  // "Après" utilise repartYear (sélecteur d'année déjà présent dans cette vue) — même
+                  // logique de résolution résidence par résidence que le graphique de trajectoire.
+                  const year = el.datasetIndex===0 ? years[0] : repartYear;
+                  toggleTrajPanel('avantApres', year, cl);
+                }}} />
+              );
+            })()}
             <p style={{fontSize:'.7rem',color:'var(--ce-vert-fonce)',marginTop:10,lineHeight:1.5}}>
               Avant = distribution DPE constatée en {years[0]}. Après = distribution projetée en {repartYear} selon
               les opérations actuellement incluses dans la simulation (bascule « Inclure les opérations identifiées » prise en compte).
             </p>
+            {trajPanel && trajPanel.source==='avantApres' && <ResidenceListPanel title={trajPanel.title} rows={trajPanel.rows} renderRow={trajPanel.renderRow} onClose={()=>setTrajPanel(null)} />}
           </div>
           <div className="ce-card">
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10,flexWrap:'wrap',gap:8}}>
@@ -3784,6 +4146,12 @@ function ViewDecarbonation({residences, operations, gainsGrid, hasGainsGrid, inc
                 ...(compareState.cible? [{ label:'Cible', data: cibleShareByYear, borderColor:COMPARE_COLORS.cible, backgroundColor:COMPARE_COLORS.cible, pointRadius:2, tension:.2 }] : []),
               ]
             }} options={{ scales:{ y:{ beginAtZero:true, max:100, title:{display:true,text:'% logements classe A-C'} } } }} />
+            <p style={{fontSize:'.7rem',color:'var(--ce-vert-fonce)',marginTop:10,lineHeight:1.5}}>
+              Base = distribution DPE de la version sauvegardée comparée ; Actuel = trajectoire déjà réalisée
+              jusqu'à l'année en cours (ligne interrompue au-delà) ; Cible = trajectoire simulée jusqu'à son
+              terme. Le Δ ci-dessus mesure l'écart en points de % de logements classe A-C entre Actuel/Cible
+              et Base — positif si le plan simulé décarbone plus vite que la Base.
+            </p>
           </div>
         </React.Fragment>
       )}
@@ -3967,8 +4335,129 @@ function ViewVente({residences, ventesSimulees, setVentesSimulees}){
    Granularité confirmée le 2026-07-10 sur les deux fichiers de référence : résidence uniquement
    (cf. commentaire au-dessus de idx.crd dans parseBaseCotation) — pas de graphique d'évolution
    dans le temps ici, faute de dimension année associée à ces montants dans les fichiers fournis. */
-function ViewFinance({residences, onSelectResidence}){
+// §Phase 6.1/6.2 — histogrammes de répartition CRD/Autofinancement/VNC, seuils éditables persistés
+// avec la sauvegarde de l'import (cf. financeSeuils dans App). Les seuils "< 2%, 2-3,5%, 3,5-6%, > 6%"
+// (Autofinancement) et "< 3%, 3-6%, 6-9%, > 9%" (CRD) trouvés dans l'Excel de référence (onglet
+// « 2. Graphiques Cotation ») portent en réalité sur un ratio absent de nos colonnes (qui n'exposent
+// que des montants bruts en € — cf. commentaire sur idx.crd/idx.autofinancement dans parseBaseCotation) :
+// les appliquer tels quels à des montants en € viderait la répartition dans une seule tranche. Défaut
+// retenu, cohérent pour les 3 indicateurs (dont VNC, pour lequel l'Excel n'a de toute façon aucun
+// seuil) : quartiles de la distribution effectivement importée — seuils entièrement éditables ci-dessous
+// si Jules préfère une autre convention.
+const FINANCE_INDICATORS = [
+  {key:'crd', label:'CRD', get:(r)=>r.crd, color:'#009261'},
+  {key:'autofinancement', label:'Autofinancement', get:(r)=>r.autofinancement, color:'#FF8364'},
+  {key:'vnc', label:'VNC', get:(r)=>r.vnc, color:'#264E46'},
+];
+function financeIndicatorValue(r, indicator, mode){
+  const raw = indicator.get(r);
+  if (raw===null || raw===undefined || isNaN(raw)) return null;
+  return mode==='parLgt' ? (r.nbLgt>0 ? raw/r.nbLgt : null) : raw;
+}
+function financeDefaultSeuils(residences, indicator, mode){
+  const vals = residences.map((r)=>financeIndicatorValue(r, indicator, mode)).filter((v)=>v!==null && v!==undefined && !isNaN(v)).sort((a,b)=>a-b);
+  if (!vals.length) return [0,0,0];
+  const q = (p)=>{ const pos=(vals.length-1)*p, base=Math.floor(pos), rest=pos-base; return vals[base+1]!==undefined? vals[base]+rest*(vals[base+1]-vals[base]) : vals[base]; };
+  const round = mode==='parLgt' ? (x)=>Math.round(x/10)*10 : (x)=>Math.round(x/100)*100;
+  return [round(q(0.25)), round(q(0.5)), round(q(0.75))];
+}
+function financeTranches(residences, indicator, mode, seuils){
+  const [b1,b2,b3] = seuils;
+  const defs = [
+    { label:'< '+fmtEur(b1), test:(v)=>v<b1 },
+    { label:fmtEur(b1)+' – '+fmtEur(b2), test:(v)=>v>=b1 && v<b2 },
+    { label:fmtEur(b2)+' – '+fmtEur(b3), test:(v)=>v>=b2 && v<b3 },
+    { label:'≥ '+fmtEur(b3), test:(v)=>v>=b3 },
+  ];
+  const tranches = defs.map((d)=>Object.assign({members:[], nbLgt:0, nbRes:0}, d));
+  residences.forEach((r)=>{
+    const v = financeIndicatorValue(r, indicator, mode);
+    if (v===null || v===undefined || isNaN(v)) return;
+    const t = tranches.find((tt)=>tt.test(v));
+    if (!t) return;
+    t.members.push(r); t.nbRes++; t.nbLgt += (r.nbLgt||0);
+  });
+  const totalLgt = tranches.reduce((s,t)=>s+t.nbLgt,0);
+  let cum = 0;
+  const cumulPct = tranches.map((t)=>{ cum += t.nbLgt; return totalLgt>0? Math.round(cum/totalLgt*100) : 0; });
+  return { tranches, cumulPct };
+}
+function FinanceHistogram({indicator, residences, mode, seuilsStore, onSeuilsChange, onSelectResidence}){
+  const defaultSeuils = useMemo(()=>financeDefaultSeuils(residences, indicator, mode), [residences, indicator, mode]);
+  const customSeuils = seuilsStore && seuilsStore[indicator.key] && seuilsStore[indicator.key][mode];
+  const seuils = customSeuils || defaultSeuils;
+  const { tranches, cumulPct } = useMemo(()=>financeTranches(residences, indicator, mode, seuils), [residences, indicator, mode, seuils]);
+  const [panelIdx, setPanelIdx] = useState(null);
+
+  function updateSeuil(i, raw){
+    const val = raw===''? 0 : Number(raw);
+    const next = seuils.slice(); next[i] = val;
+    const store = Object.assign({}, seuilsStore);
+    store[indicator.key] = Object.assign({}, store[indicator.key], {[mode]: next});
+    onSeuilsChange(store);
+    setPanelIdx(null);
+  }
+
+  return (
+    <div className="ce-card">
+      <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700,marginBottom:10}}>
+        Répartition — {indicator.label} ({mode==='parLgt'?'par logement':'par résidence'})
+      </h2>
+      <div style={{display:'flex',gap:10,flexWrap:'wrap',marginBottom:12,alignItems:'flex-end'}}>
+        {[0,1,2].map((i)=>(
+          <div key={i} style={{display:'flex',flexDirection:'column',gap:4}}>
+            <label style={{fontSize:'.66rem',fontWeight:700,color:'var(--ce-vert-fonce)',textTransform:'uppercase'}}>Seuil {i+1}{mode==='parLgt'?' (€/lgt)':' (€)'}</label>
+            <input className="ce-input" style={{width:120}} type="number" value={seuils[i]} onChange={(e)=>updateSeuil(i, e.target.value)} />
+          </div>
+        ))}
+      </div>
+      <ChartCanvas type="bar" height={260} data={{
+        labels: tranches.map((t)=>t.label),
+        datasets: [
+          { type:'bar', label:'Logements', data: tranches.map((t)=>t.nbLgt), backgroundColor: indicator.color, yAxisID:'y', borderRadius:4 },
+          { type:'bar', label:'Résidences', data: tranches.map((t)=>t.nbRes), backgroundColor: hexToRgba(indicator.color,0.35), yAxisID:'y1', borderRadius:4 },
+          { type:'line', label:'% cumulé (logements)', data: cumulPct, borderColor:'#1C3A35', backgroundColor:'#1C3A35', pointRadius:3, yAxisID:'y2', tension:.2 },
+        ]
+      }} options={{
+        scales:{
+          y:{ type:'linear', position:'left', beginAtZero:true, title:{display:true,text:'Logements'} },
+          y1:{ type:'linear', position:'right', beginAtZero:true, title:{display:true,text:'Résidences'}, grid:{drawOnChartArea:false} },
+          y2:{ type:'linear', position:'right', beginAtZero:true, max:100, title:{display:true,text:'% cumulé'}, grid:{drawOnChartArea:false}, offset:true },
+        },
+        onClick:(evt,elements)=>{
+          if (!elements.length) return;
+          const idx = elements[0].index;
+          setPanelIdx((cur)=> cur===idx? null : idx);
+        }
+      }} />
+      <p style={{fontSize:'.7rem',color:'var(--ce-vert-fonce)',marginTop:10,lineHeight:1.5}}>
+        Barres : nombre de logements (échelle de gauche) et de résidences (échelle de droite) par tranche.
+        Courbe : % cumulé de logements de cette tranche et des tranches inférieures (courbe de Pareto).
+        Seuils modifiables ci-dessus, persistés avec la sauvegarde de l'import. Cliquez sur une barre
+        pour voir le détail des résidences de cette tranche.
+      </p>
+      {panelIdx!==null && (
+        <ResidenceListPanel
+          title={tranches[panelIdx].label+' — '+tranches[panelIdx].members.length+' résidence'+(tranches[panelIdx].members.length>1?'s':'')}
+          rows={tranches[panelIdx].members}
+          onClose={()=>setPanelIdx(null)}
+          renderRow={(r)=>{
+            const v = financeIndicatorValue(r, indicator, mode);
+            return (
+              <div onClick={()=>onSelectResidence && onSelectResidence(r)} style={{display:'flex',justifyContent:'space-between',gap:8,fontSize:'.76rem',color:'var(--ce-vert-fonce)',padding:'3px 0',borderBottom:'1px solid #f0f5f3',cursor:onSelectResidence?'pointer':'default'}}>
+                <span>{r.nom || r.code}</span>
+                <span style={{color:'#9fb3ae',flexShrink:0}}>{fmtEur(v)}{mode==='parLgt'?'/lgt':''} — {fmtNum(r.nbLgt)} lgt</span>
+              </div>
+            );
+          }}
+        />
+      )}
+    </div>
+  );
+}
+function ViewFinance({residences, onSelectResidence, financeSeuils, setFinanceSeuils}){
   const [search, setSearch] = useState('');
+  const [mode, setMode] = useState('parRes'); // 'parRes' | 'parLgt' — cf. §6.2
   const rows = useMemo(()=>residences.filter((r)=>r.crd!==null || r.autofinancement!==null || r.vnc!==null), [residences]);
   const filteredRows = useMemo(()=>{
     const s = ceNorm(search);
@@ -4020,6 +4509,14 @@ function ViewFinance({residences, onSelectResidence}){
           dimension année associée à ces montants).
         </p>
       </div>
+      <div style={{display:'flex',alignItems:'center',gap:8}}>
+        <span style={{fontSize:'.78rem',fontWeight:700,color:'var(--ce-vert-fonce)'}}>Répartition :</span>
+        <button className={mode==='parRes'?'ce-btn ce-btn-sm':'ce-btn-outline ce-btn-sm'} onClick={()=>setMode('parRes')}>Par résidence</button>
+        <button className={mode==='parLgt'?'ce-btn ce-btn-sm':'ce-btn-outline ce-btn-sm'} onClick={()=>setMode('parLgt')}>Par logement</button>
+      </div>
+      {FINANCE_INDICATORS.map((ind)=>(
+        <FinanceHistogram key={ind.key} indicator={ind} residences={rows} mode={mode} seuilsStore={financeSeuils} onSeuilsChange={setFinanceSeuils} onSelectResidence={onSelectResidence} />
+      ))}
       <div className="ce-card">
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:10,marginBottom:12}}>
           <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700}}>Détail par résidence ({filteredRows.length})</h2>
@@ -4062,8 +4559,14 @@ function pivotAggregate(items, metric){
 // lignes au clic sur un en-tête, heatmap optionnelle, champs enrichis, presets de croisements
 // rapides). Priorisation fine et détail visuel (heatmap, presets) non arbitrés avec Jules : traité en
 // dernier, implémentation volontairement simple plutôt que de deviner un détail non validé.
-function ViewPivot({residences, operations, onSelectResidence}){
+function ViewPivot({residences, operations, onSelectResidence, customPivotViews, setCustomPivotViews}){
   const [dataset, setDataset] = useState('residences');
+  const [showChart, setShowChart] = useState(false); // §7.1 — toggle Tableau/Graphique
+  const [newViewName, setNewViewName] = useState('');
+  // §7.2 — application d'une vue personnalisée qui change de jeu de données : setDataset ci-dessous
+  // déclenche l'effet [dataset] qui réinitialise rowKey/colKey/metricKeys par défaut ; cette réf permet
+  // à cet effet d'appliquer la vue visée à la place des valeurs par défaut, sans course entre les deux.
+  const pendingViewRef = useRef(null);
   const resByCode = useMemo(()=>{ const m={}; residences.forEach((r)=>m[r.code]=r); return m; }, [residences]);
 
   const RESIDENCE_FIELDS = useMemo(()=>[
@@ -4111,9 +4614,35 @@ function ViewPivot({residences, operations, onSelectResidence}){
   const [drillIdx, setDrillIdx] = useState(null); // {rowIdx, cellIdx} de la cellule dépliée
 
   useEffect(()=>{
-    setRowKey(fields[0].key); setColKey(''); setMetricKeys([metrics[0].key]); setSortIdx(null); setDrillIdx(null);
+    const pending = pendingViewRef.current;
+    if (pending && pending.dataset===dataset){
+      setRowKey(pending.rowKey); setColKey(pending.colKey||''); setMetricKeys(pending.metricKeys && pending.metricKeys.length? pending.metricKeys : [metrics[0].key]); setHeatmap(!!pending.heatmap);
+      pendingViewRef.current = null;
+    } else {
+      setRowKey(fields[0].key); setColKey(''); setMetricKeys([metrics[0].key]);
+    }
+    setSortIdx(null); setDrillIdx(null);
     // eslint-disable-next-line
   }, [dataset]);
+
+  // §7.2 — sauvegarder la configuration actuelle sous un nom, l'appliquer, ou la supprimer.
+  function saveCurrentView(){
+    const nom = newViewName.trim();
+    if (!nom) return;
+    const view = { id: genLocalId('pivotview'), nom, dataset, rowKey, colKey, metricKeys: metricKeys.slice(), heatmap };
+    setCustomPivotViews((customPivotViews||[]).concat([view]));
+    setNewViewName('');
+  }
+  function applyCustomView(v){
+    if (v.dataset===dataset){
+      setRowKey(v.rowKey); setColKey(v.colKey||''); setMetricKeys(v.metricKeys && v.metricKeys.length? v.metricKeys : [metrics[0].key]); setHeatmap(!!v.heatmap);
+      setSortIdx(null); setDrillIdx(null);
+    } else {
+      pendingViewRef.current = v;
+      setDataset(v.dataset);
+    }
+  }
+  function deleteCustomView(id){ setCustomPivotViews((customPivotViews||[]).filter((v)=>v.id!==id)); }
 
   const rowField = fields.find((f)=>f.key===rowKey) || fields[0];
   const colField = colKey ? fields.find((f)=>f.key===colKey) : null;
@@ -4207,10 +4736,27 @@ function ViewPivot({residences, operations, onSelectResidence}){
 
   return (
     <div style={{padding:24,display:'flex',flexDirection:'column',gap:20}}>
+      <div className="ce-card" style={{background:'var(--ce-saumon)'}}>
+        <p style={{fontSize:'.72rem',color:'var(--ce-vert-fonce)',lineHeight:1.5,margin:0}}>
+          Choisissez un champ à mettre en ligne et, si besoin, un champ à mettre en colonne, puis une ou
+          plusieurs valeurs à agréger. Cliquez sur une cellule du tableau pour voir le détail des
+          résidences ou opérations qui la composent, et sur un en-tête de colonne pour trier.
+        </p>
+      </div>
       <div className="ce-card">
         <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700,marginBottom:14}}>Tableau croisé dynamique</h2>
-        <div style={{display:'flex',gap:6,flexWrap:'wrap',marginBottom:14}}>
+        <div style={{display:'flex',gap:6,flexWrap:'wrap',alignItems:'center',marginBottom:8}}>
           {PRESETS.map((p)=><button key={p.label} className="ce-btn-outline ce-btn-sm" onClick={p.apply}>{p.label}</button>)}
+          {(customPivotViews||[]).map((v)=>(
+            <span key={v.id} style={{display:'inline-flex',alignItems:'center',gap:2}}>
+              <button className="ce-btn-outline ce-btn-sm" onClick={()=>applyCustomView(v)}>{v.nom}</button>
+              <button title="Supprimer cette vue" onClick={()=>deleteCustomView(v.id)} style={{background:'none',border:'none',cursor:'pointer',color:'var(--ce-corail)',fontSize:'.9rem',padding:'0 2px'}}>×</button>
+            </span>
+          ))}
+        </div>
+        <div style={{display:'flex',gap:6,alignItems:'center',marginBottom:14}}>
+          <input className="ce-input" style={{width:200}} placeholder="Nom de la vue à sauvegarder…" value={newViewName} onChange={(e)=>setNewViewName(e.target.value)} />
+          <button className="ce-btn-outline ce-btn-sm" onClick={saveCurrentView} disabled={!newViewName.trim()}>+ Sauvegarder cette vue</button>
         </div>
         <div style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'flex-end'}}>
           <div style={{display:'flex',flexDirection:'column',gap:4}}>
@@ -4251,6 +4797,38 @@ function ViewPivot({residences, operations, onSelectResidence}){
       </div>
 
       <div className="ce-card">
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12,flexWrap:'wrap',gap:8}}>
+          <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700}}>Résultat</h2>
+          <div style={{display:'flex',gap:6}}>
+            <button className={!showChart?'ce-btn ce-btn-sm':'ce-btn-outline ce-btn-sm'} onClick={()=>setShowChart(false)}>Tableau</button>
+            <button className={showChart?'ce-btn ce-btn-sm':'ce-btn-outline ce-btn-sm'} onClick={()=>setShowChart(true)}>Graphique</button>
+          </div>
+        </div>
+        {showChart ? (
+          <React.Fragment>
+            {activeMetrics.length>1 && (
+              <div style={{fontSize:'.72rem',color:'var(--ce-vert-fonce)',marginBottom:8}}>Graphique limité à la 1ère valeur cochée : {activeMetrics[0].label}</div>
+            )}
+            <ChartCanvas type="bar" height={Math.max(260, sortedRows.length*22)} data={{
+              labels: sortedRows.map((r)=>r.key),
+              datasets: colField ? pivot.colKeys.map((ck,ci)=>({
+                label: ck,
+                data: sortedRows.map((r)=>{ const c = r.cells.find((cc)=>cc.colKey===ck); return c? c.value : null; }),
+                backgroundColor: PALETTE[ci%PALETTE.length],
+                stack: 's',
+              })) : [{
+                label: activeMetrics[0].label,
+                data: sortedRows.map((r)=>{ const c = r.cells[0]; return c? c.value : null; }),
+                backgroundColor: '#009261',
+              }]
+            }} options={{
+              indexAxis:'y',
+              scales:{ x:{stacked:!!colField, beginAtZero:true}, y:{stacked:!!colField} },
+              plugins:{ legend:{display:!!colField}, tooltip:{ callbacks:{ label:(ctx)=> ctx.dataset.label+': '+(activeMetrics[0].fmt? activeMetrics[0].fmt(ctx.raw) : fmtNum(ctx.raw)) } } },
+            }} />
+          </React.Fragment>
+        ) : (
+        <React.Fragment>
         <div style={{overflowX:'auto',border:'1px solid #eef4f2',borderRadius:8}}>
           <table className="ce-table">
             <thead>
@@ -4295,26 +4873,27 @@ function ViewPivot({residences, operations, onSelectResidence}){
           </table>
         </div>
         {drillCell && (
-          <div style={{marginTop:14,border:'1px solid #eef4f2',borderRadius:8,padding:'10px 14px',maxHeight:280,overflowY:'auto'}}>
-            <div style={{fontSize:'.78rem',fontWeight:700,color:'var(--ce-vert-tres-fonce)',marginBottom:8}}>
-              {drillCell.items.length} élément{drillCell.items.length>1?'s':''} dans cette cellule
-            </div>
-            {drillCell.items.length===0 && <div style={{fontSize:'.76rem',color:'#9fb3ae'}}>Aucun élément.</div>}
-            {drillCell.items.slice(0,200).map((it,i)=>{
+          <ResidenceListPanel
+            title={drillCell.items.length+' élément'+(drillCell.items.length>1?'s':'')+' dans cette cellule'}
+            rows={drillCell.items}
+            maxHeight={280}
+            marginTop={14}
+            renderRow={(it)=>{
               const r = dataset==='residences' ? it : resByCode[it.resCode];
               const label = dataset==='residences' ? (it.nom||it.code) : ((r&&r.nom)||it.resCode)+' — '+(it.nature||it.type||'Non renseigné')+' ('+(it.annee||'n.c.')+')';
               return (
-                <div key={i} onClick={()=>r && onSelectResidence && onSelectResidence(r)} style={{fontSize:'.76rem',color:'var(--ce-vert-fonce)',padding:'3px 0',borderBottom:'1px solid #f0f5f3',cursor:(r&&onSelectResidence)?'pointer':'default'}}>
+                <div onClick={()=>r && onSelectResidence && onSelectResidence(r)} style={{fontSize:'.76rem',color:'var(--ce-vert-fonce)',padding:'3px 0',borderBottom:'1px solid #f0f5f3',cursor:(r&&onSelectResidence)?'pointer':'default'}}>
                   {label}
                 </div>
               );
-            })}
-            {drillCell.items.length>200 && <div style={{fontSize:'.7rem',color:'#9fb3ae',marginTop:6}}>… et {drillCell.items.length-200} de plus (affinez les filtres transverses pour réduire la liste).</div>}
-          </div>
+            }}
+          />
+        )}
+        </React.Fragment>
         )}
         <p style={{fontSize:'.7rem',color:'var(--ce-vert-fonce)',marginTop:10,lineHeight:1.5}}>
           Le tableau croisé s'applique sur les données déjà filtrées par la barre de filtres transverses (pour les résidences),
-          et se recalcule entièrement dans votre navigateur. Cliquez sur une cellule pour voir le détail, sur un en-tête pour trier.
+          et se recalcule entièrement dans votre navigateur.
         </p>
       </div>
     </div>
@@ -4366,6 +4945,10 @@ function RadarChart({title, values}){
 function CriteresBarChart({title, values, residences, groupKey}){
   const known = values.filter((v)=>v.value!==null && v.value!==undefined);
   if (known.length<3) return null;
+  // Fragilité sociale : seul groupe dont les valeurs sont un % (cf. parseBaseCotation), pas une note
+  // sur 100 comme les autres groupes — l'axe et l'infobulle le précisent pour ne pas laisser croire
+  // que c'est une note comparable ; économique (et les groupes en RadarChart) restent inchangés.
+  const isPercent = groupKey==='social';
   const parcAvg = known.map((v)=>{
     const vals = residences.map((r)=>{ const g=r.critereGroups && r.critereGroups[groupKey]; if(!g) return null; const m=g.values.find((x)=>x.label===v.label); return m? m.value : null; }).filter((x)=>x!==null && x!==undefined);
     return vals.length? vals.reduce((a,b)=>a+b,0)/vals.length : null;
@@ -4379,7 +4962,9 @@ function CriteresBarChart({title, values, residences, groupKey}){
           { type:'bar', label:'Résidence', data: known.map((v)=>v.value), backgroundColor:'rgba(0,146,97,0.38)', borderRadius:4 },
           { type:'line', label:'Moyenne du parc filtré', data: parcAvg, borderColor:'#FF8364', backgroundColor:'#FF8364', pointRadius:3, fill:false },
         ]
-      }} options={{ indexAxis:'y', scales:{ x:{ min:0, max:100 } } }} />
+      }} options={{ indexAxis:'y', scales:{ x:{ min:0, max:100, title: isPercent? {display:true, text:'%'} : undefined } },
+        plugins: isPercent? { tooltip:{ callbacks:{ label:(ctx)=> ctx.dataset.label+' : '+Math.round(ctx.parsed.x)+'%' } } } : undefined
+      }} />
     </div>
   );
 }
@@ -4746,6 +5331,10 @@ function ResidenceDrawer({residence, operations, residences, onClose, gainsGrid,
                   <GaugeChart label="Note technique" value={residence.technique} max={100} color="#264E46" />
                   {residence.performanceCarbone!==null && <GaugeChart label="Performance carbone" value={residence.performanceCarbone} max={100} color="#58D88B" />}
                 </div>
+                <p style={{fontSize:'.68rem',color:'var(--ce-vert-fonce)',marginTop:10,lineHeight:1.5}}>
+                  Chaque jauge affiche la note de la résidence ramenée sur une échelle de 0 (pire cas
+                  observé dans le fichier importé) à 100 (meilleur cas).
+                </p>
               </div>
               <div className="ce-card">
                 <h3 style={{fontSize:'.8rem',fontWeight:700,marginBottom:10}}>Scores de diagnostic</h3>
@@ -4759,21 +5348,33 @@ function ResidenceDrawer({residence, operations, residences, onClose, gainsGrid,
                   ) : null)}
                 </div>
               )}
+              {Object.keys(critereGroups).length>0 && (
+                <p style={{fontSize:'.68rem',color:'var(--ce-vert-fonce)',marginTop:-8,lineHeight:1.5}}>
+                  Chaque radar détaille les sous-critères d'un des 5 groupes de cotation ci-dessus (Environnement,
+                  Programme, État technique, Performance carbone, Confort d'été / Résilience climatique) : un axe
+                  par sous-critère, chacun noté de 0 (pire) à 100 (meilleur) — plus la forme couvre le radar, meilleure
+                  est la résidence sur ce groupe.
+                </p>
+              )}
               {['economique','social'].map((key)=> critereGroups[key] && residences && residences.length ? (
                 <CriteresBarChart key={key} title={critereGroups[key].label} values={critereGroups[key].values} residences={residences} groupKey={key} />
               ) : null)}
               {(quadrantAttractTechnique || quadrantClimatTechnique) && (
                 <div className="ce-card">
-                  <h3 style={{fontSize:'.8rem',fontWeight:700,marginBottom:10}}>Positionnement dans le patrimoine (filtres actifs)</h3>
-                  <div style={{display:'flex',gap:8,flexWrap:'wrap',justifyContent:'space-around'}}>
+                  <h3 style={{fontSize:'.8rem',fontWeight:700,marginBottom:10}}>Profil comparable dans le patrimoine filtré</h3>
+                  <div style={{display:'flex',flexDirection:'column',gap:8}}>
                     {quadrantAttractTechnique && (
-                      <GaugeChart label={"Attractivité × Technique : "+quadrantAttractTechnique.xBand+' / '+quadrantAttractTechnique.yBand} value={quadrantAttractTechnique.count} max={quadrantAttractTechnique.total} color="#FF8364" />
+                      <div style={{fontSize:'.82rem',color:'var(--ce-vert-tres-fonce)'}}>
+                        <b>{fmtNum(quadrantAttractTechnique.count)} résidence{quadrantAttractTechnique.count>1?'s':''} sur {fmtNum(quadrantAttractTechnique.total)}</b> partage{quadrantAttractTechnique.count>1?'nt':''} le même profil (Attractivité {quadrantAttractTechnique.xBand} × État technique {quadrantAttractTechnique.yBand}) que celle-ci.
+                      </div>
                     )}
                     {quadrantClimatTechnique && (
-                      <GaugeChart label={"Climat × Technique : "+quadrantClimatTechnique.xBand+' / '+quadrantClimatTechnique.yBand} value={quadrantClimatTechnique.count} max={quadrantClimatTechnique.total} color="#F8C6BA" />
+                      <div style={{fontSize:'.82rem',color:'var(--ce-vert-tres-fonce)'}}>
+                        <b>{fmtNum(quadrantClimatTechnique.count)} résidence{quadrantClimatTechnique.count>1?'s':''} sur {fmtNum(quadrantClimatTechnique.total)}</b> partage{quadrantClimatTechnique.count>1?'nt':''} le même profil (Climat {quadrantClimatTechnique.xBand} × État technique {quadrantClimatTechnique.yBand}) que celle-ci.
+                      </div>
                     )}
                   </div>
-                  <p style={{fontSize:'.68rem',color:'var(--ce-vert-fonce)',marginTop:8,lineHeight:1.5}}>Nombre de résidences du patrimoine filtré partageant le même positionnement (Très bon / Bon / Mauvais sur chaque axe, cf. Segmentation en 9 familles) que la résidence affichée, sur le nombre total de résidences classées.</p>
+                  <p style={{fontSize:'.68rem',color:'var(--ce-vert-fonce)',marginTop:10,lineHeight:1.5}}>Comptage réalisé sur les résidences actuellement filtrées (barre de filtres transverses en haut de l'outil), pas sur l'ensemble du patrimoine importé.</p>
                 </div>
               )}
               {identifieesTop4.length>0 && (
@@ -4801,7 +5402,7 @@ function ResidenceDrawer({residence, operations, residences, onClose, gainsGrid,
           {tab==='actions' && (
             <div style={{display:'flex',flexDirection:'column',gap:16}}>
               <div>
-                <h3 style={{fontSize:'.8rem',fontWeight:700,marginBottom:8,color:'var(--ce-vert-principal)'}}>Actions arbitrées ({programmees.length})</h3>
+                <h3 style={{fontSize:'.8rem',fontWeight:700,marginBottom:8,color:'var(--ce-vert-principal)'}}>Travaux programmés ({programmees.length})</h3>
                 {programmees.map((o)=>(<div key={o.id} className="ce-card" style={{marginBottom:8,borderLeft:'4px solid var(--ce-vert-principal)'}}>
                   <b>{o.nature || o.type || 'Non renseigné'}</b> — {o.annee||'année n.c.'}{o.anneeFin? ' → '+o.anneeFin:''} — {fmtEur(o.montant)}
                   {o.logements>0 && o.montant!==null && o.montant!==undefined && <span style={{color:'#9fb3ae'}}> ({fmtEur(o.montant/o.logements)}/lgt)</span>}
@@ -4810,7 +5411,7 @@ function ResidenceDrawer({residence, operations, residences, onClose, gainsGrid,
                 {programmees.length===0 && <div style={{fontSize:'.78rem',color:'#9fb3ae'}}>Aucune.</div>}
               </div>
               <div>
-                <h3 style={{fontSize:'.8rem',fontWeight:700,marginBottom:8,color:'var(--ce-corail)'}}>Actions à arbitrer ({identifiees.length})</h3>
+                <h3 style={{fontSize:'.8rem',fontWeight:700,marginBottom:8,color:'var(--ce-corail)'}}>Travaux à arbitrer ({identifiees.length})</h3>
                 {identifiees.map((o)=>(<div key={o.id} className="ce-card" style={{marginBottom:8,borderLeft:'4px solid var(--ce-corail)'}}>
                   <b>{o.nature || o.type || 'Non renseigné'}</b> — {o.annee||'année n.c.'}{o.anneeFin? ' → '+o.anneeFin:''} — {fmtEur(o.montant)}
                   {o.logements>0 && o.montant!==null && o.montant!==undefined && <span style={{color:'#9fb3ae'}}> ({fmtEur(o.montant/o.logements)}/lgt)</span>}
@@ -4876,6 +5477,14 @@ function App(){
   const [simOperations, setSimOperationsRaw] = useState([]);
   const [budgetLignes, setBudgetLignesRaw] = useState([]);
   const [offreNouvelleLgt, setOffreNouvelleLgtRaw] = useState({});
+  // §Phase 6 — seuils des histogrammes CRD/Autofinancement/VNC : {crd:{parRes:[b1,b2,b3], parLgt:[...]}, ...},
+  // seulement peuplé pour les indicateurs/modes explicitement personnalisés par l'utilisateur (une
+  // sauvegarde plus ancienne sans ce champ retombe sur les seuils par défaut calculés depuis les
+  // données, cf. ViewFinance) — même principe de compatibilité ascendante que budgetLignes.
+  const [financeSeuils, setFinanceSeuilsRaw] = useState({});
+  // §Phase 7.2 — vues personnalisées du pivot ({id, nom, dataset, rowKey, colKey, metricKeys, heatmap}),
+  // persistées avec la sauvegarde de l'import comme financeSeuils ci-dessus.
+  const [customPivotViews, setCustomPivotViewsRaw] = useState([]);
   const [ventesSimulees, setVentesSimuleesRaw] = useState([]);
   const [includeIdentifiees, setIncludeIdentifiees] = useState(true);
   const [dirty, setDirty] = useState(false);
@@ -4916,6 +5525,8 @@ function App(){
     setBudgetLignesRaw([]);
     setOffreNouvelleLgtRaw({});
     setVentesSimuleesRaw([]);
+    setFinanceSeuilsRaw({});
+    setCustomPivotViewsRaw([]);
     setDirty(false);
     setActiveTab('ensemble');
     setSelectedResidence(null);
@@ -4937,6 +5548,8 @@ function App(){
     setBudgetLignesRaw(migrateBudgetLignes(rec));
     setOffreNouvelleLgtRaw(rec.offreNouvelleLgt || {});
     setVentesSimuleesRaw(rec.ventesSimulees || []);
+    setFinanceSeuilsRaw(rec.financeSeuils || {});
+    setCustomPivotViewsRaw(rec.customPivotViews || []);
     setIncludeIdentifiees(rec.includeIdentifiees!==undefined? rec.includeIdentifiees : true);
     setDirty(false);
     setActiveTab('ensemble');
@@ -4956,7 +5569,9 @@ function App(){
   function setBudgetLignes(next){ setBudgetLignesRaw(next); setDirty(true); }
   function setOffreNouvelleLgt(next){ setOffreNouvelleLgtRaw(next); setDirty(true); }
   function setVentesSimulees(next){ setVentesSimuleesRaw(next); setDirty(true); }
-  function resetSimulation(){ setSimOperationsRaw(data.operations.map((o)=>Object.assign({},o))); setBudgetLignesRaw([]); setOffreNouvelleLgtRaw({}); setVentesSimuleesRaw([]); setIncludeIdentifiees(true); setDirty(false); }
+  function setFinanceSeuils(next){ setFinanceSeuilsRaw(next); setDirty(true); }
+  function setCustomPivotViews(next){ setCustomPivotViewsRaw(next); setDirty(true); }
+  function resetSimulation(){ setSimOperationsRaw(data.operations.map((o)=>Object.assign({},o))); setBudgetLignesRaw([]); setOffreNouvelleLgtRaw({}); setVentesSimuleesRaw([]); setFinanceSeuilsRaw({}); setCustomPivotViewsRaw([]); setIncludeIdentifiees(true); setDirty(false); }
 
   async function doSaveCurrent(name, asNew){
     const existing = (!asNew && currentSaveId) ? await idbGet(currentSaveId) : null;
@@ -4966,7 +5581,7 @@ function App(){
       nomFichierSource: data.fileName,
       gabaritComplet: data.gabaritComplet,
       nbCols: data.nbCols,
-      data, simOperations, budgetLignes, offreNouvelleLgt, ventesSimulees, includeIdentifiees,
+      data, simOperations, budgetLignes, offreNouvelleLgt, ventesSimulees, includeIdentifiees, financeSeuils, customPivotViews,
       estBase: existing? existing.estBase : false,
       dateCreation: existing? existing.dateCreation : undefined,
     });
@@ -5075,7 +5690,7 @@ function App(){
       </div>
 
       <div style={{flex:1}}>
-        {activeTab==='ensemble' && <ViewEnsemble residences={filteredResidences} operations={filteredOperations} />}
+        {activeTab==='ensemble' && <ViewEnsemble residences={filteredResidences} operations={filteredOperations} onSelectResidence={setSelectedResidence} />}
         {activeTab==='cotation' && <ViewCotation residences={filteredResidences} onSelectResidence={setSelectedResidence} operations={filteredOperations} includeIdentifiees={includeIdentifiees} baseImport={baseImportFiltered} gainsGrid={data.gainsGrid} hasGainsGrid={data.hasGainsGrid} offreNouvelleLgt={offreNouvelleLgt} />}
         {activeTab==='invest' && (
           <ViewInvestissements
@@ -5096,8 +5711,8 @@ function App(){
             onSelectResidence={setSelectedResidence}
           />
         )}
-        {activeTab==='dpe' && <ViewDecarbonation residences={filteredResidences} operations={filteredOperations} gainsGrid={data.gainsGrid} hasGainsGrid={data.hasGainsGrid} includeIdentifiees={includeIdentifiees} baseImport={baseImportFiltered} />}
-        {activeTab==='finance' && <ViewFinance residences={filteredResidences} onSelectResidence={setSelectedResidence} />}
+        {activeTab==='dpe' && <ViewDecarbonation residences={filteredResidences} operations={filteredOperations} gainsGrid={data.gainsGrid} hasGainsGrid={data.hasGainsGrid} includeIdentifiees={includeIdentifiees} baseImport={baseImportFiltered} onSelectResidence={setSelectedResidence} />}
+        {activeTab==='finance' && <ViewFinance residences={filteredResidences} onSelectResidence={setSelectedResidence} financeSeuils={financeSeuils} setFinanceSeuils={setFinanceSeuils} />}
         {activeTab==='offre' && (
           <ViewOffreNouvelle
             residences={filteredResidences}
@@ -5116,14 +5731,14 @@ function App(){
             }}
           />
         )}
-        {activeTab==='pivot' && <ViewPivot residences={filteredResidences} operations={filteredOperations} onSelectResidence={setSelectedResidence} />}
+        {activeTab==='pivot' && <ViewPivot residences={filteredResidences} operations={filteredOperations} onSelectResidence={setSelectedResidence} customPivotViews={customPivotViews} setCustomPivotViews={setCustomPivotViews} />}
         {activeTab==='carto' && <ViewCarto residences={filteredResidences} allResidences={data.residences} onSelectResidence={setSelectedResidence} />}
         {activeTab==='compare' && (
           <ViewComparatif currentSnapshot={currentSnapshot} />
         )}
       </div>
 
-      <div className="ce-footer">cellance — Document confidentiel — Traitement 100% local ; exceptions : l'onglet Cartographie transmet les adresses des résidences à l'API publique api-adresse.data.gouv.fr pour les géolocaliser, et les sauvegardes sont partagées (visibles par tous les visiteurs de cet outil)</div>
+      <div className="ce-footer">Cellance - Confidentiel</div>
       <ResidenceDrawer residence={selectedResidence} operations={simOperations} residences={filteredResidences} onClose={()=>setSelectedResidence(null)} gainsGrid={data.gainsGrid} hasGainsGrid={data.hasGainsGrid} includeIdentifiees={includeIdentifiees} baseImport={baseImportFiltered} />
     </div>
   );
