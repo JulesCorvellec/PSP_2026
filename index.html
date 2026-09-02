@@ -982,7 +982,14 @@ async function sbGeocodeCacheGetMany(keys){
 }
 async function sbGeocodeCacheSetMany(entries){
   if (!sbClient || !entries.length) return;
-  const rows = entries.map(({key, result})=>({
+  // Deux résidences peuvent partager exactement la même adresse normalisée (immeubles d'un même
+  // ensemble, doublon de saisie...) : `entries` peut alors contenir plusieurs fois la même clé. Or
+  // Postgres refuse un upsert dont le lot contient deux lignes en conflit sur la même clé ("ON
+  // CONFLICT DO UPDATE command cannot affect row a second time", erreur 21000) — reproduit en usage
+  // réel sur un import de test. On ne garde qu'une entrée par clé avant d'envoyer le lot.
+  const byKey = new Map();
+  entries.forEach(({key, result})=>byKey.set(key, result));
+  const rows = Array.from(byKey, ([key, result])=>({
     key,
     lat: result? result.lat : null, lon: result? result.lon : null,
     label: result? result.label : null, score: result? result.score : null,
