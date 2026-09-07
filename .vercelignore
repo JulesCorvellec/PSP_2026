@@ -3,6 +3,4 @@ Base patrimoniale_PSP STANDARD vBase.xlsx
 .claude
 node_modules
 tests
-package.json
-package-lock.json
 vitest.config.js
