@@ -11,7 +11,7 @@
      (bloque un <script src="https://domaine-pirate/..."> injecté ou un CDN compromis chargé depuis une
      origine imprévue) et (b) connect-src/img-src, qui bornent vers quels domaines des données pourraient
      être exfiltrées (fetch/XHR/beacon) — la protection réseau reste utile même avec script inline autorisé. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; worker-src 'self' blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https://cdnjs.cloudflare.com https://*.tile.openstreetmap.org; connect-src 'self' https://nmbcfoutaysgeiqnkicr.supabase.co https://api-adresse.data.gouv.fr; object-src 'none'; base-uri 'self';" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdnjs.cloudflare.com; worker-src 'self' blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https://cdnjs.cloudflare.com https://*.tile.openstreetmap.org; connect-src 'self' https://api-adresse.data.gouv.fr; object-src 'none'; base-uri 'self';" />
 <!-- frame-ancestors n'est pas honoré via <meta> (uniquement via l'en-tête HTTP CSP) : omis ici plutôt
      que laissé pour produire un avertissement console à chaque chargement sans effet réel. -->
 <title>PSP automatisé — Cellance</title>
@@ -24,7 +24,9 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.22.20/babel.min.js" integrity="sha384-cq1MTAJzr8ymlZ2Wb0kFfHDC6fOAUbtTmsifwK03WtSQBbE5Kgrk3kjhYGJrspxJ" crossorigin="anonymous"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js" integrity="sha384-bs/nf9FbdNouRbMiFcrcZfLXYPKiPaGVGplVbv7dLGECccEXDW+S3zjqSKR5ZEaD" crossorigin="anonymous"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js" integrity="sha384-vtjasyidUo0kW94K5MXDXntzOJpQgBKXmE7e2Ga4LG0skTTLeBi97eFAXsqewJjw" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.112.4/dist/umd/supabase.min.js" integrity="sha384-yiVMs0R/Jyz7OhoXa/DsEMUSBLjEhr/QJta2ONO+zB6I8/GmNg/7AUFrZmAJV7KV" crossorigin="anonymous"></script>
+<!-- Le SDK Supabase (et toute clé API) n'est plus chargé côté navigateur depuis la migration vers un
+     backend d'authentification : tous les échanges Supabase passent désormais par /api/* (cf.
+     apiFetch et les fonctions idb*/sbGeocodeCache* plus bas), qui seul détient la clé service_role. -->
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" integrity="sha384-c6Rcwz4e4CITMbu/NBmnNS8yN2sC3cUElMEMfP3vqqKFp7GOYaaBBCqmaWBjmkjb" crossorigin="anonymous" />
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js" integrity="sha384-NElt3Op+9NBMCYaef5HxeJmU4Xeard/Lku8ek6hoPTvYkQPh3zLIrJP7KiRocsxO" crossorigin="anonymous"></script>
 <style>
@@ -875,10 +877,10 @@ function useGeocoding(residences){
       // localStorage, on regarde si quelqu'un d'autre (même import consulté ailleurs, autre bailleur
       // partageant des adresses) les a déjà géocodées — c'est ce qui rend un import déjà consulté par
       // un collègue, ou rouvert depuis un autre appareil/navigateur, quasi instantané sur cet écran.
-      // Best-effort : sans Supabase configuré, ou en cas d'erreur, on continue directement sur l'API
-      // externe comme avant (sbGeocodeCacheGetMany renvoie alors {} sans lever).
+      // Best-effort : en cas d'erreur (backend inaccessible, etc.), on continue directement sur l'API
+      // externe comme avant (sbGeocodeCacheGetMany avale déjà l'erreur et renvoie {} sans lever).
       let stillToFetch = toFetch;
-      if (sbClient){
+      {
         const keys = Array.from(new Set(toFetch.map((r)=>ceAddrKey(r.adresse))));
         const shared = await sbGeocodeCacheGetMany(keys);
         const remaining = [];
@@ -924,101 +926,80 @@ function useGeocoding(residences){
   return {coords, progress, status};
 }
 
-/* ---------------- Sauvegarde partagée des imports (Supabase) ----------------
-   Les imports sauvegardés sont stockés dans une table Supabase commune à tous les visiteurs de
-   l'outil : quiconque ouvre la page voit et peut modifier/supprimer les mêmes sauvegardes (pas de
-   compte, pas de distinction lecture/écriture — protection uniquement via les politiques RLS de la
-   table, cf. README). L'enregistrement complet (données + simulation en cours) est stocké tel quel
-   dans la colonne jsonb `payload` de la table SB_TABLE. */
-const SUPABASE_URL = 'https://nmbcfoutaysgeiqnkicr.supabase.co';
-const SUPABASE_ANON_KEY = 'sb_publishable_7oUKBCknllyV5XO7lyJkZg_gfzv0DCK';
-const SB_TABLE = 'psp_shared_imports';
-const sbClient = (typeof window!=='undefined' && window.supabase && !/^REMPLACER_/.test(SUPABASE_URL))
-  ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
-  : null;
-function sbRequireClient(){
-  if (!sbClient) throw new Error('Sauvegarde partagée indisponible : configuration Supabase manquante (SUPABASE_URL / SUPABASE_ANON_KEY).');
-  return sbClient;
+/* ---------------- Appels au backend (auth + proxy Supabase) ----------------
+   Depuis la migration vers un backend d'authentification, le frontend ne détient plus aucune clé
+   Supabase et ne parle plus jamais directement à Supabase : toutes les fonctions ci-dessous appellent
+   /api/* (Vercel Serverless Functions, cf. dossier api/), qui seul détient la clé service_role. La
+   session est un cookie httpOnly (posé par /api/auth/login) : `credentials:'include'` l'attache
+   automatiquement à chaque requête, jamais lu/manipulé en JS ici. Un 401 (cookie absent ou JWT expiré
+   après 12h) déclenche `onUnauthorized` — enregistrée par AuthGate au montage — qui renvoie
+   immédiatement vers l'écran de connexion, quel que soit l'endroit du code où l'appel a été fait. */
+let onUnauthorized = null;
+function setUnauthorizedHandler(fn){ onUnauthorized = fn; }
+async function apiFetch(path, options){
+  const res = await fetch(path, Object.assign({ credentials:'include' }, options||{}, {
+    headers: Object.assign({ 'Content-Type':'application/json' }, (options && options.headers) || {}),
+  }));
+  if (res.status===401){
+    if (onUnauthorized) onUnauthorized();
+    throw new Error('Session expirée.');
+  }
+  return res;
 }
+async function apiJson(path, options){
+  const res = await apiFetch(path, options);
+  let json = null;
+  try { json = await res.json(); } catch(e){ /* réponse vide (ex. 405) */ }
+  if (!res.ok) throw new Error((json && json.error) || ('Erreur serveur ('+res.status+').'));
+  return json || {};
+}
+
+/* ---------------- Sauvegarde partagée des imports (proxy backend -> Supabase) ----------------
+   Les imports sauvegardés sont stockés dans une table Supabase commune à tous les utilisateurs
+   connectés de l'outil (cf. README, section Authentification) : n'importe quel compte peut voir,
+   modifier ou supprimer n'importe quelle sauvegarde — pas de distinction par propriétaire, seule la
+   connexion (compte + mot de passe) est requise. L'enregistrement complet (données + simulation en
+   cours) est stocké tel quel dans la colonne jsonb `payload` de la table côté serveur. */
 async function idbGetAll(){
-  if (!sbClient) return [];
-  const { data, error } = await sbClient.from(SB_TABLE).select('payload');
-  if (error) throw error;
-  return (data || []).map((row)=>row.payload);
+  const json = await apiJson('/api/saves');
+  return json.records || [];
 }
 async function idbGet(id){
-  if (!sbClient) return null;
-  const { data, error } = await sbClient.from(SB_TABLE).select('payload').eq('id', id).maybeSingle();
-  if (error) throw error;
-  return data ? data.payload : null;
+  const json = await apiJson('/api/saves/'+encodeURIComponent(id));
+  return json.record || null;
 }
 async function idbPut(record){
-  const client = sbRequireClient();
-  const { error } = await client.from(SB_TABLE).upsert({ id: record.id, payload: record, updated_at: new Date().toISOString() });
-  if (error) throw error;
+  await apiJson('/api/saves', { method:'POST', body: JSON.stringify(record) });
   return true;
 }
 async function idbDelete(id){
-  const client = sbRequireClient();
-  const { error } = await client.from(SB_TABLE).delete().eq('id', id);
-  if (error) throw error;
+  await apiJson('/api/saves/'+encodeURIComponent(id), { method:'DELETE' });
+  return true;
+}
+// Un seul import "base" à la fois : logique désormais appliquée atomiquement côté serveur (cf.
+// api/saves/set-base.js), plus jamais orchestrée ici via une boucle de GetAll+Put.
+async function idbSetBase(id){
+  await apiJson('/api/saves/set-base', { method:'POST', body: JSON.stringify({id}) });
   return true;
 }
 
-/* ---------------- Cache de géolocalisation partagé (Supabase) ----------------
-   Table distincte de SB_TABLE : une ligne par adresse normalisée (clé = ceAddrKey), quel que soit
-   l'import ou le visiteur d'origine — un géocodage effectué une fois profite à tout le monde ensuite.
-   Best-effort par construction (cf. useGeocoding) : sans cette table créée côté Supabase (voir
-   README), ces fonctions échouent silencieusement et l'outil retombe sur le comportement précédent
-   (géocodage direct + cache localStorage uniquement). */
-const SB_GEOCODE_TABLE = 'psp_geocode_cache';
-function chunkArray(arr, size){
-  const out = []; for (let i=0;i<arr.length;i+=size) out.push(arr.slice(i,i+size)); return out;
-}
+/* ---------------- Cache de géolocalisation partagé (proxy backend -> Supabase) ----------------
+   Une ligne par adresse normalisée (clé = ceAddrKey), quel que soit l'import ou l'utilisateur
+   d'origine — un géocodage effectué une fois profite à tout le monde ensuite. Best-effort par
+   construction (cf. useGeocoding) : ces fonctions avalent déjà toute erreur réseau/serveur en
+   retombant sur {}/rien plutôt que de faire échouer l'affichage de la carte pour l'utilisateur
+   courant. */
 async function sbGeocodeCacheGetMany(keys){
-  if (!sbClient || !keys.length) return {};
-  const out = {};
-  // .in() encode la liste de clés dans l'URL de la requête : on segmente pour rester sous les
-  // limites de taille d'URL sur un grand parc (plusieurs centaines/milliers d'adresses distinctes).
-  for (const chunk of chunkArray(keys, 300)){
-    try {
-      const { data, error } = await sbClient.from(SB_GEOCODE_TABLE).select('key,lat,lon,label,score').in('key', chunk);
-      if (error || !data) continue;
-      data.forEach((row)=>{
-        out[row.key] = (row.lat===null || row.lat===undefined) ? null : { lat:row.lat, lon:row.lon, label:row.label, score:row.score };
-      });
-    } catch(e){ /* best-effort : une erreur réseau sur un lot ne doit pas bloquer les autres */ }
-  }
-  return out;
+  if (!keys.length) return {};
+  try {
+    const json = await apiJson('/api/geocode-cache/get', { method:'POST', body: JSON.stringify({keys}) });
+    return json.results || {};
+  } catch(e){ return {}; }
 }
 async function sbGeocodeCacheSetMany(entries){
-  if (!sbClient || !entries.length) return;
-  // Deux résidences peuvent partager exactement la même adresse normalisée (immeubles d'un même
-  // ensemble, doublon de saisie...) : `entries` peut alors contenir plusieurs fois la même clé. Or
-  // Postgres refuse un upsert dont le lot contient deux lignes en conflit sur la même clé ("ON
-  // CONFLICT DO UPDATE command cannot affect row a second time", erreur 21000) — reproduit en usage
-  // réel sur un import de test. On ne garde qu'une entrée par clé avant d'envoyer le lot.
-  const byKey = new Map();
-  entries.forEach(({key, result})=>byKey.set(key, result));
-  const rows = Array.from(byKey, ([key, result])=>({
-    key,
-    lat: result? result.lat : null, lon: result? result.lon : null,
-    label: result? result.label : null, score: result? result.score : null,
-    updated_at: new Date().toISOString(),
-  }));
-  try { await sbClient.from(SB_GEOCODE_TABLE).upsert(rows, {onConflict:'key'}); }
+  if (!entries.length) return;
+  try { await apiJson('/api/geocode-cache/set', { method:'POST', body: JSON.stringify({entries}) }); }
   catch(e){ /* best-effort : un échec d'écriture du cache partagé ne doit jamais bloquer l'affichage de la carte pour l'utilisateur courant */ }
-}
-// Un seul import "base" à la fois : logique centralisée ici, jamais dupliquée entre l'écran de
-// liste et un éventuel autre point d'entrée (cf. points de vigilance de la spec).
-async function idbSetBase(id){
-  const all = await idbGetAll();
-  for (const rec of all){
-    const shouldBeBase = rec.id===id;
-    if (!!rec.estBase !== shouldBeBase){
-      await idbPut(Object.assign({}, rec, {estBase: shouldBeBase}));
-    }
-  }
 }
 function genSaveId(){
   return 'psp_' + Date.now() + '_' + Math.random().toString(36).slice(2, 10);
@@ -1209,7 +1190,7 @@ function LeafletMap({markers, height, onSelectResidence}){
 // planter l'onglet. Seuil généreux pour un fichier PSP réel (les gabarits Cellance existants font
 // quelques Mo) tout en filtrant les cas clairement aberrants.
 const MAX_IMPORT_FILE_BYTES = 50 * 1024 * 1024;
-function ImportScreen({onLoaded, onRestore, onBaseChanged}){
+function ImportScreen({onLoaded, onRestore, onBaseChanged, currentUser, onLogout}){
   const [drag, setDrag] = useState(false);
   const [loading, setLoading] = useState(false);
   const [loadingMsg, setLoadingMsg] = useState('Analyse du fichier en cours…');
@@ -1406,7 +1387,13 @@ function ImportScreen({onLoaded, onRestore, onBaseChanged}){
 
   return (
     <div style={{minHeight:'100vh',display:'flex',flexDirection:'column'}}>
-      <div className="ce-header"><CeLogo/><span className="ce-header-title">Outil interactif d'exploration du <b>PSP</b></span></div>
+      <div className="ce-header">
+        <CeLogo/><span className="ce-header-title">Outil interactif d'exploration du <b>PSP</b></span>
+        <div style={{marginLeft:'auto',display:'flex',gap:10,alignItems:'center'}}>
+          <span style={{color:'#fff',fontSize:'.76rem',opacity:.85}}>{currentUser && currentUser.email}</span>
+          <button className="ce-btn-outline ce-btn-sm" style={{color:'#fff',borderColor:'#fff'}} onClick={onLogout}>Déconnexion</button>
+        </div>
+      </div>
       <div style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',padding:'40px 24px'}}>
         <div style={{maxWidth:640,width:'100%'}}>
           <h1 style={{color:'var(--ce-vert-principal)',fontSize:'1.6rem',fontWeight:700,marginBottom:6}}>Import du fichier PSP</h1>
@@ -1459,17 +1446,6 @@ function ImportScreen({onLoaded, onRestore, onBaseChanged}){
           </div>
           {importJsonError && <div style={{marginBottom:12,fontSize:'.75rem',color:'var(--ce-corail)'}}><b>Import refusé.</b> {importJsonError}</div>}
           {opError && <div style={{marginBottom:12,fontSize:'.75rem',color:'var(--ce-corail)'}}>{opError}</div>}
-          {!sbClient && (
-            // idbGetAll() renvoie [] en silence quand sbClient est indisponible (cf. plus haut) : sans ce
-            // message, un blocage réseau/CDN sur cdn.jsdelivr.net (contrairement à cdnjs.cloudflare.com,
-            // souvent autorisé séparément par les pare-feux d'entreprise) laisse croire qu'il n'existe
-            // simplement aucune sauvegarde partagée, alors que le service est juste inaccessible.
-            <div style={{marginBottom:12,fontSize:'.75rem',color:'var(--ce-corail)'}}>
-              Service de sauvegarde partagée indisponible (échec de chargement depuis cdn.jsdelivr.net — vérifiez
-              votre connexion ou les règles de votre pare-feu). Les sauvegardes existantes ne peuvent pas être
-              affichées et aucun nouvel import ne peut être sauvegardé pour le moment.
-            </div>
-          )}
 
           {saves && saves.length>0 && (
             <div className="ce-card" style={{padding:0,overflowX:'auto'}}>
@@ -1679,7 +1655,7 @@ const NAV_ITEMS = [
   {id:'pivot', label:'Analyse libre (pivot)'},
   {id:'carto', label:'Cartographie'},
 ];
-function Nav({active, setActive, hasFinance, hasCarto, hasCompare}){
+function Nav({active, setActive, hasFinance, hasCarto, hasCompare, hasAdmin}){
   const [openSection, setOpenSection] = useState(null);
   const items = NAV_ITEMS.map((it)=>{
     if (it.id==='finance') return Object.assign({}, it, {disabled: !hasFinance});
@@ -1687,6 +1663,7 @@ function Nav({active, setActive, hasFinance, hasCarto, hasCompare}){
     return it;
   });
   if (hasCompare) items.push({id:'compare', label:'Comparatif'});
+  if (hasAdmin) items.push({id:'admin', label:'Administration'});
 
   // Une section reste surlignée tant que l'onglet actif lui appartient, indépendamment du menu
   // déroulant (qui, lui, ne reste ouvert que tant que l'utilisateur ne l'a pas refermé/n'a pas choisi
@@ -5472,7 +5449,7 @@ function ResidenceDrawer({residence, operations, residences, onClose, gainsGrid,
 }
 
 /* ---------------- App racine ---------------- */
-function App(){
+function App({currentUser, onLogout}){
   const [data, setData] = useState(null);
   const [simOperations, setSimOperationsRaw] = useState([]);
   const [budgetLignes, setBudgetLignesRaw] = useState([]);
@@ -5645,7 +5622,7 @@ function App(){
   }) : null, [data, simOperations, budgetLignes, includeIdentifiees]);
 
   if (!data){
-    return <ImportScreen onLoaded={onLoaded} onRestore={onRestoreSave} onBaseChanged={()=>setBaseRefreshTick((t)=>t+1)} />;
+    return <ImportScreen onLoaded={onLoaded} onRestore={onRestoreSave} onBaseChanged={()=>setBaseRefreshTick((t)=>t+1)} currentUser={currentUser} onLogout={onLogout} />;
   }
 
   const filteredCodes = new Set(filteredResidences.map((r)=>r.code));
@@ -5681,12 +5658,14 @@ function App(){
             </span>
             <button className="ce-btn-outline ce-btn-sm" style={{color:'#fff',borderColor:'#fff'}} onClick={()=>setShowSaveModal(true)}>💾 Sauvegarder cet import</button>
             <button className="ce-btn-outline ce-btn-sm" style={{color:'#fff',borderColor:'#fff'}} onClick={goToImportScreen}>Importer un autre fichier</button>
+            <span style={{color:'#fff',fontSize:'.76rem',opacity:.85}}>{currentUser && currentUser.email}</span>
+            <button className="ce-btn-outline ce-btn-sm" style={{color:'#fff',borderColor:'#fff'}} onClick={onLogout}>Déconnexion</button>
           </div>
         </div>
 
 
         <FilterBar residences={data.residences} filters={filters} setFilters={setFilters} />
-        <Nav active={activeTab} setActive={setActiveTab} hasFinance={hasFinance} hasCarto={hasCarto} hasCompare={hasCompare} />
+        <Nav active={activeTab} setActive={setActiveTab} hasFinance={hasFinance} hasCarto={hasCarto} hasCompare={hasCompare} hasAdmin={!!(currentUser && currentUser.isAdmin)} />
       </div>
 
       <div style={{flex:1}}>
@@ -5736,12 +5715,251 @@ function App(){
         {activeTab==='compare' && (
           <ViewComparatif currentSnapshot={currentSnapshot} />
         )}
+        {activeTab==='admin' && <ViewAdmin currentUser={currentUser} />}
       </div>
 
       <div className="ce-footer">Cellance - Confidentiel</div>
       <ResidenceDrawer residence={selectedResidence} operations={simOperations} residences={filteredResidences} onClose={()=>setSelectedResidence(null)} gainsGrid={data.gainsGrid} hasGainsGrid={data.hasGainsGrid} includeIdentifiees={includeIdentifiees} baseImport={baseImportFiltered} />
     </div>
   );
+}
+
+/* ---------------- Authentification (écrans de connexion / premier compte) ----------------
+   Toute l'app est derrière le login (cf. AuthGate plus bas) : ces deux écrans partagent la même mise
+   en page que ImportScreen (même en-tête, même pied de page) pour rester cohérents visuellement avant
+   même qu'un fichier soit importé. */
+function LoginScreen({onLoggedIn}){
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  async function submit(e){
+    e.preventDefault();
+    setError(null); setLoading(true);
+    try {
+      const json = await apiJson('/api/auth/login', {method:'POST', body: JSON.stringify({email, password})});
+      onLoggedIn(json.user);
+    } catch(err){ setError(err.message || 'Échec de la connexion.'); }
+    setLoading(false);
+  }
+
+  return (
+    <div style={{minHeight:'100vh',display:'flex',flexDirection:'column'}}>
+      <div className="ce-header"><CeLogo/><span className="ce-header-title">Outil interactif d'exploration du <b>PSP</b></span></div>
+      <div style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',padding:24}}>
+        <form onSubmit={submit} className="ce-card" style={{maxWidth:360,width:'100%'}}>
+          <h1 style={{fontSize:'1.1rem',fontWeight:700,color:'var(--ce-vert-tres-fonce)',marginBottom:16}}>Connexion</h1>
+          <div style={{display:'flex',flexDirection:'column',gap:4,marginBottom:12}}>
+            <label style={{fontSize:'.72rem',fontWeight:700,color:'var(--ce-vert-fonce)'}}>Email</label>
+            <input className="ce-input" type="email" required autoFocus value={email} onChange={(e)=>setEmail(e.target.value)} />
+          </div>
+          <div style={{display:'flex',flexDirection:'column',gap:4,marginBottom:16}}>
+            <label style={{fontSize:'.72rem',fontWeight:700,color:'var(--ce-vert-fonce)'}}>Mot de passe</label>
+            <input className="ce-input" type="password" required value={password} onChange={(e)=>setPassword(e.target.value)} />
+          </div>
+          {error && <div style={{fontSize:'.76rem',color:'var(--ce-corail)',marginBottom:12}}>{error}</div>}
+          <button className="ce-btn" type="submit" disabled={loading} style={{width:'100%'}}>{loading?'Connexion…':'Se connecter'}</button>
+        </form>
+      </div>
+      <div className="ce-footer">Cellance - Confidentiel</div>
+    </div>
+  );
+}
+
+function BootstrapScreen({onLoggedIn}){
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  async function submit(e){
+    e.preventDefault();
+    setError(null);
+    if (password.length<8){ setError('Mot de passe : 8 caractères minimum.'); return; }
+    if (password!==confirm){ setError('Les deux mots de passe ne correspondent pas.'); return; }
+    setLoading(true);
+    try {
+      const json = await apiJson('/api/auth/bootstrap', {method:'POST', body: JSON.stringify({email, password})});
+      onLoggedIn(json.user);
+    } catch(err){ setError(err.message || 'Échec de la création du compte.'); }
+    setLoading(false);
+  }
+
+  return (
+    <div style={{minHeight:'100vh',display:'flex',flexDirection:'column'}}>
+      <div className="ce-header"><CeLogo/><span className="ce-header-title">Outil interactif d'exploration du <b>PSP</b></span></div>
+      <div style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',padding:24}}>
+        <form onSubmit={submit} className="ce-card" style={{maxWidth:400,width:'100%'}}>
+          <h1 style={{fontSize:'1.1rem',fontWeight:700,color:'var(--ce-vert-tres-fonce)',marginBottom:6}}>Créer le premier compte administrateur</h1>
+          <p style={{fontSize:'.76rem',color:'var(--ce-vert-fonce)',marginBottom:16,lineHeight:1.5}}>
+            Aucun compte n'existe encore sur cet outil. Ce premier compte sera administrateur et pourra
+            ensuite créer les autres comptes depuis l'onglet « Administration ».
+          </p>
+          <div style={{display:'flex',flexDirection:'column',gap:4,marginBottom:12}}>
+            <label style={{fontSize:'.72rem',fontWeight:700,color:'var(--ce-vert-fonce)'}}>Email</label>
+            <input className="ce-input" type="email" required autoFocus value={email} onChange={(e)=>setEmail(e.target.value)} />
+          </div>
+          <div style={{display:'flex',flexDirection:'column',gap:4,marginBottom:12}}>
+            <label style={{fontSize:'.72rem',fontWeight:700,color:'var(--ce-vert-fonce)'}}>Mot de passe (8 caractères minimum)</label>
+            <input className="ce-input" type="password" required value={password} onChange={(e)=>setPassword(e.target.value)} />
+          </div>
+          <div style={{display:'flex',flexDirection:'column',gap:4,marginBottom:16}}>
+            <label style={{fontSize:'.72rem',fontWeight:700,color:'var(--ce-vert-fonce)'}}>Confirmer le mot de passe</label>
+            <input className="ce-input" type="password" required value={confirm} onChange={(e)=>setConfirm(e.target.value)} />
+          </div>
+          {error && <div style={{fontSize:'.76rem',color:'var(--ce-corail)',marginBottom:12}}>{error}</div>}
+          <button className="ce-btn" type="submit" disabled={loading} style={{width:'100%'}}>{loading?'Création…':'Créer le compte'}</button>
+        </form>
+      </div>
+      <div className="ce-footer">Cellance - Confidentiel</div>
+    </div>
+  );
+}
+
+/* ---------------- Administration (gestion des comptes, réservée aux administrateurs) ---------------- */
+function ViewAdmin({currentUser}){
+  const [users, setUsers] = useState(null);
+  const [error, setError] = useState(null);
+  const [newEmail, setNewEmail] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [newIsAdmin, setNewIsAdmin] = useState(false);
+  const [resetPasswordFor, setResetPasswordFor] = useState(null);
+  const [resetPasswordValue, setResetPasswordValue] = useState('');
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+
+  async function refresh(){
+    try { const json = await apiJson('/api/admin/users'); setUsers(json.users||[]); }
+    catch(err){ setError(err.message); }
+  }
+  useEffect(()=>{ refresh(); }, []);
+
+  async function addUser(e){
+    e.preventDefault();
+    setError(null);
+    try {
+      await apiJson('/api/admin/users', {method:'POST', body: JSON.stringify({email:newEmail, password:newPassword, isAdmin:newIsAdmin})});
+      setNewEmail(''); setNewPassword(''); setNewIsAdmin(false);
+      await refresh();
+    } catch(err){ setError(err.message); }
+  }
+  async function toggleAdmin(u){
+    setError(null);
+    try { await apiJson('/api/admin/users/'+u.id, {method:'PATCH', body: JSON.stringify({isAdmin: !u.is_admin})}); await refresh(); }
+    catch(err){ setError(err.message); }
+  }
+  async function submitResetPassword(id){
+    setError(null);
+    if (resetPasswordValue.length<8){ setError('Mot de passe : 8 caractères minimum.'); return; }
+    try {
+      await apiJson('/api/admin/users/'+id, {method:'PATCH', body: JSON.stringify({password:resetPasswordValue})});
+      setResetPasswordFor(null); setResetPasswordValue('');
+    } catch(err){ setError(err.message); }
+  }
+  async function deleteUser(id){
+    setError(null);
+    try { await apiJson('/api/admin/users/'+id, {method:'DELETE'}); setConfirmDeleteId(null); await refresh(); }
+    catch(err){ setError(err.message); }
+  }
+
+  return (
+    <div style={{padding:24,display:'flex',flexDirection:'column',gap:20}}>
+      <div className="ce-card">
+        <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700,marginBottom:12}}>Ajouter un utilisateur</h2>
+        <form onSubmit={addUser} style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'flex-end'}}>
+          <div style={{display:'flex',flexDirection:'column',gap:4}}>
+            <label style={{fontSize:'.66rem',fontWeight:700,color:'var(--ce-vert-fonce)',textTransform:'uppercase'}}>Email</label>
+            <input className="ce-input" type="email" required value={newEmail} onChange={(e)=>setNewEmail(e.target.value)} style={{width:220}} />
+          </div>
+          <div style={{display:'flex',flexDirection:'column',gap:4}}>
+            <label style={{fontSize:'.66rem',fontWeight:700,color:'var(--ce-vert-fonce)',textTransform:'uppercase'}}>Mot de passe</label>
+            <input className="ce-input" type="password" required value={newPassword} onChange={(e)=>setNewPassword(e.target.value)} style={{width:180}} />
+          </div>
+          <label style={{fontSize:'.78rem',color:'var(--ce-vert-fonce)',display:'flex',alignItems:'center',gap:6,cursor:'pointer'}}>
+            <input type="checkbox" checked={newIsAdmin} onChange={(e)=>setNewIsAdmin(e.target.checked)} />Administrateur
+          </label>
+          <button className="ce-btn ce-btn-sm" type="submit">+ Ajouter</button>
+        </form>
+      </div>
+      {error && <div style={{fontSize:'.78rem',color:'var(--ce-corail)'}}>{error}</div>}
+      <div className="ce-card">
+        <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700,marginBottom:12}}>Utilisateurs{users? ' ('+users.length+')' : ''}</h2>
+        {!users && <div style={{fontSize:'.8rem',color:'#9fb3ae'}}>Chargement…</div>}
+        {users && (
+          <div style={{overflowX:'auto'}}>
+          <table className="ce-table">
+            <thead><tr><th>Email</th><th>Rôle</th><th>Créé le</th><th></th><th></th><th></th></tr></thead>
+            <tbody>
+              {users.map((u)=>(
+                <tr key={u.id}>
+                  <td>{u.email}{u.id===currentUser.id? <span style={{color:'#9fb3ae'}}> (vous)</span> : null}</td>
+                  <td><span className={"ce-badge"+(u.is_admin?"":" ce-badge-outline")}>{u.is_admin? 'Administrateur':'Utilisateur'}</span></td>
+                  <td>{new Date(u.created_at).toLocaleDateString('fr-FR')}</td>
+                  <td><button className="ce-btn-outline ce-btn-sm" onClick={()=>toggleAdmin(u)}>{u.is_admin? 'Retirer admin':'Rendre admin'}</button></td>
+                  <td>
+                    {resetPasswordFor===u.id ? (
+                      <span style={{display:'flex',gap:4,alignItems:'center'}}>
+                        <input className="ce-input" type="password" placeholder="Nouveau mot de passe" style={{width:160}} value={resetPasswordValue} onChange={(e)=>setResetPasswordValue(e.target.value)} />
+                        <button className="ce-btn ce-btn-sm" onClick={()=>submitResetPassword(u.id)}>OK</button>
+                        <button className="ce-btn-outline ce-btn-sm" onClick={()=>{setResetPasswordFor(null); setResetPasswordValue('');}}>Annuler</button>
+                      </span>
+                    ) : (
+                      <button className="ce-btn-outline ce-btn-sm" onClick={()=>{setResetPasswordFor(u.id); setResetPasswordValue('');}}>Changer le mot de passe</button>
+                    )}
+                  </td>
+                  <td>
+                    {confirmDeleteId===u.id ? (
+                      <span style={{display:'flex',gap:4}}>
+                        <button className="ce-btn-corail ce-btn-sm" onClick={()=>deleteUser(u.id)}>Confirmer</button>
+                        <button className="ce-btn-outline ce-btn-sm" onClick={()=>setConfirmDeleteId(null)}>Annuler</button>
+                      </span>
+                    ) : (
+                      <button className="ce-btn-outline ce-btn-sm" onClick={()=>setConfirmDeleteId(u.id)}>Supprimer</button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Porte d'entrée de toute l'app : vérifie la session au montage (cookie httpOnly, jamais lu
+// directement — cf. /api/auth/me), affiche l'écran de création du 1er compte s'il n'en existe encore
+// aucun, sinon l'écran de connexion, sinon l'app. Enregistre aussi le handler appelé par apiFetch sur
+// un 401 (survenu n'importe où dans l'app, y compris longtemps après le chargement initial si le JWT
+// de 12h expire en cours de session) pour renvoyer immédiatement vers la connexion.
+function AuthGate(){
+  const [status, setStatus] = useState('loading'); // 'loading'|'bootstrap'|'login'|'authed'
+  const [currentUser, setCurrentUser] = useState(null);
+
+  useEffect(()=>{
+    setUnauthorizedHandler(()=>{ setCurrentUser(null); setStatus('login'); });
+    (async()=>{
+      const me = await apiJson('/api/auth/me').catch(()=>null);
+      if (me && me.user){ setCurrentUser(me.user); setStatus('authed'); return; }
+      try {
+        const st = await apiJson('/api/auth/status');
+        setStatus(st.hasUsers ? 'login' : 'bootstrap');
+      } catch(e){ setStatus('login'); }
+    })();
+  }, []);
+
+  function handleLoggedIn(user){ setCurrentUser(user); setStatus('authed'); }
+  async function handleLogout(){
+    try { await apiJson('/api/auth/logout', {method:'POST'}); } catch(e){ /* on déconnecte quand même côté UI */ }
+    setCurrentUser(null); setStatus('login');
+  }
+
+  if (status==='loading') return <div style={{minHeight:'100vh',background:'var(--ce-vert-tres-clair)'}}></div>;
+  if (status==='bootstrap') return <BootstrapScreen onLoggedIn={handleLoggedIn} />;
+  if (status==='login') return <LoginScreen onLoggedIn={handleLoggedIn} />;
+  return <App currentUser={currentUser} onLogout={handleLogout} />;
 }
 
 function MissingLibsScreen({missing}){
@@ -5764,7 +5982,7 @@ if (typeof XLSX==='undefined') missingLibs.push('SheetJS (lecture Excel)');
 if (typeof Chart==='undefined') missingLibs.push('Chart.js (graphiques)');
 if (typeof L==='undefined') missingLibs.push('Leaflet (cartographie)');
 
-ReactDOM.createRoot(document.getElementById('root')).render(missingLibs.length ? <MissingLibsScreen missing={missingLibs} /> : <App />);
+ReactDOM.createRoot(document.getElementById('root')).render(missingLibs.length ? <MissingLibsScreen missing={missingLibs} /> : <AuthGate />);
 </script>
 </body>
 </html>

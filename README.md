@@ -1,68 +1,66 @@
 # PSP automatisé — Cellance
 
-Outil interactif d'exploration du Plan Stratégique de Patrimoine (PSP), livré comme un fichier HTML autonome (React + Chart.js + SheetJS + Leaflet, chargés en CDN). Tout le traitement (import Excel, calculs, simulation) a lieu dans le navigateur. Exceptions :
-- l'onglet **Cartographie** transmet les adresses des résidences (uniquement les adresses, aucune autre donnée du fichier) à l'API publique et gratuite [api-adresse.data.gouv.fr](https://api-adresse.data.gouv.fr/) (Base Adresse Nationale) afin de les géolocaliser ; les résultats sont mis en cache dans le localStorage du navigateur puis, si Supabase est configuré (cf. ci-dessous), dans une table Supabase partagée par tous les visiteurs — une adresse déjà géocodée par n'importe qui n'est ensuite plus jamais renvoyée à l'API externe.
-- les imports **sauvegardés** (bouton « Sauvegarder cet import ») sont stockés dans une base [Supabase](https://supabase.com/) partagée par tous les visiteurs de l'outil : n'importe qui ayant accès à l'URL de l'outil peut voir, modifier ou supprimer une sauvegarde (pas de compte, pas d'authentification — cf. « Sauvegarde partagée » ci-dessous).
+Outil interactif d'exploration du Plan Stratégique de Patrimoine (PSP) : un frontend HTML autonome (React + Chart.js + SheetJS + Leaflet, chargés en CDN — `index.html`) et un backend léger (Vercel Serverless Functions, dossier `api/`) qui sert de proxy authentifié vers Supabase. Tout le traitement métier (import Excel, calculs, simulation) a lieu dans le navigateur ; seuls les échanges avec Supabase et l'authentification passent par le backend. Exceptions :
+- l'onglet **Cartographie** transmet les adresses des résidences (uniquement les adresses, aucune autre donnée du fichier) à l'API publique et gratuite [api-adresse.data.gouv.fr](https://api-adresse.data.gouv.fr/) (Base Adresse Nationale) afin de les géolocaliser, directement depuis le navigateur (ce n'est pas Supabase) ; les résultats sont mis en cache dans le localStorage du navigateur puis dans une table Supabase partagée (via le backend) — une adresse déjà géocodée par n'importe qui n'est ensuite plus jamais renvoyée à l'API externe.
+- les imports **sauvegardés** (bouton « Sauvegarder cet import ») sont stockés dans une base [Supabase](https://supabase.com/) partagée par tous les utilisateurs connectés de l'outil : n'importe quel compte peut voir, modifier ou supprimer une sauvegarde (pas de distinction par propriétaire — seule la connexion est requise, cf. « Authentification » ci-dessous).
 
-## Sauvegarde partagée (Supabase)
+## Authentification (backend)
 
-L'écran d'import (bouton « Sauvegarder cet import ») écrit dans une table Supabase commune à tous les utilisateurs — ce n'est plus un stockage local au navigateur. À configurer une seule fois :
+Toute l'application est derrière un écran de connexion (email + mot de passe). Le frontend ne détient
+plus aucune clé Supabase : il appelle `/api/*` (Vercel Serverless Functions, Node.js), qui seul
+détient la clé `service_role` Supabase et signe les jetons de session.
 
-1. Créer un projet gratuit sur [supabase.com](https://supabase.com/).
-2. Dans l'éditeur SQL du projet, exécuter :
-   ```sql
-   create table if not exists public.psp_shared_imports (
-     id text primary key,
-     payload jsonb not null,
-     updated_at timestamptz not null default now()
-   );
-   alter table public.psp_shared_imports enable row level security;
-   create policy "public read" on public.psp_shared_imports for select using (true);
-   create policy "public insert" on public.psp_shared_imports for insert with check (true);
-   create policy "public update" on public.psp_shared_imports for update using (true) with check (true);
-   create policy "public delete" on public.psp_shared_imports for delete using (true);
-   ```
-   Ces politiques ouvrent la table en lecture/écriture à quiconque connaît la clé publique (« anon ») du projet — cohérent avec le choix de ne pas gérer de comptes, mais à garder en tête si des sauvegardes contiennent des données sensibles.
-3. Dans `index.html`, renseigner `SUPABASE_URL` et `SUPABASE_ANON_KEY` (section « Sauvegarde partagée des imports (Supabase) ») avec l'URL du projet et sa clé publique `anon`, visibles dans Project Settings → API.
+- **Session** : un JWT valable 12h, posé par le backend dans un cookie `HttpOnly` + `Secure` +
+  `SameSite=Strict` — illisible en JavaScript (protection XSS). Le frontend ne le lit jamais ; il
+  détecte l'expiration/l'absence de session via les réponses `401` du backend et renvoie alors
+  automatiquement vers l'écran de connexion (cf. `apiFetch`/`AuthGate` dans `index.html`).
+- **Mots de passe** : hachés avec bcrypt (jamais stockés en clair), verrouillage temporaire (15 min)
+  après 5 échecs de connexion consécutifs sur un compte.
+- **Comptes** : pas d'inscription libre. Le tout premier compte (administrateur) se crée depuis
+  l'écran affiché automatiquement tant qu'aucun compte n'existe (`/api/auth/bootstrap`, désactivé dès
+  qu'un compte existe). Les comptes suivants se créent depuis l'onglet **Administration** (visible
+  uniquement aux administrateurs) : ajout d'utilisateur, bascule administrateur/utilisateur,
+  réinitialisation de mot de passe, suppression.
 
-Tant que ces deux valeurs ne sont pas renseignées, l'écran d'import fonctionne mais aucune sauvegarde n'est possible.
+### Mise en place (une seule fois)
 
-## Cache de géolocalisation partagé (Supabase)
-
-Réutilise le même projet Supabase que la sauvegarde partagée ci-dessus (mêmes `SUPABASE_URL` / `SUPABASE_ANON_KEY`) — il suffit de créer une table supplémentaire, en une fois :
-
-```sql
-create table if not exists public.psp_geocode_cache (
-  key text primary key,
-  lat double precision,
-  lon double precision,
-  label text,
-  score double precision,
-  updated_at timestamptz not null default now()
-);
-alter table public.psp_geocode_cache enable row level security;
-create policy "public read" on public.psp_geocode_cache for select using (true);
-create policy "public insert" on public.psp_geocode_cache for insert with check (true);
-create policy "public update" on public.psp_geocode_cache for update using (true) with check (true);
-```
-
-Une ligne par adresse normalisée (indépendamment de l'import ou du visiteur d'origine) : dès qu'une
-adresse a été géocodée une fois par quelqu'un, elle n'est plus jamais renvoyée à l'API externe
-api-adresse.data.gouv.fr, y compris pour un autre visiteur ou un autre appareil. `lat`/`lon` à `null`
-signifie « adresse cherchée mais aucun résultat trouvé » (mis en cache comme une réponse légitime,
-pour ne pas re-tenter inutilement) — à distinguer d'une ligne absente (jamais cherchée). Sans cette
-table (ou sans Supabase configuré), l'outil fonctionne à l'identique, avec uniquement le cache
-localStorage du navigateur comme avant.
+1. **Table utilisateurs** — dans l'éditeur SQL du projet Supabase déjà utilisé pour les sauvegardes/le
+   cache de géocodage, exécuter `supabase_users_table.sql` (à la racine du dépôt).
+2. **Variables d'environnement du backend** — dans Vercel (Project Settings → Environment Variables),
+   définir (jamais dans un fichier commité — cf. `.env.local.example` pour tester en local avec
+   `vercel dev`) :
+   - `SUPABASE_URL` — même projet Supabase que celui déjà utilisé (Project Settings → API → Project URL).
+   - `SUPABASE_SERVICE_ROLE_KEY` — clé **service_role** (Project Settings → API → service_role secret),
+     à ne jamais confondre avec l'ancienne clé `anon` (retirée du frontend, à considérer comme
+     compromise puisque visible dans l'historique Git — cf. étape 4).
+   - `JWT_SECRET` — chaîne aléatoire longue, générée une fois : `node -e "console.log(require('crypto').randomBytes(48).toString('base64'))"`.
+3. **Déployer**, puis ouvrir l'outil : l'écran de création du premier compte administrateur s'affiche
+   automatiquement (aucun compte n'existe encore). Les comptes suivants se créent depuis
+   Administration une fois connecté.
+4. **Verrouillage des tables existantes** (recommandé, après avoir vérifié que la connexion et les
+   sauvegardes fonctionnent) — exécuter `supabase_lockdown_existing_tables.sql` pour retirer les
+   anciennes policies RLS ouvertes à quiconque connaît la clé `anon` (le backend utilise
+   `service_role`, qui contourne RLS et n'a besoin d'aucune policy). Envisager aussi de régénérer la
+   clé `anon` du projet (Project Settings → API), puisque l'ancienne reste visible dans l'historique Git.
 
 ## Contenu du dépôt
 
-- `index.html` — l'application complète (v1.5). Ouvrable directement dans un navigateur, sans build ni serveur.
+- `index.html` — le frontend (v1.6). Ouvrable directement dans un navigateur, sans build.
+- `api/` — le backend (Vercel Serverless Functions, Node.js) : authentification, administration des
+  comptes, et proxy vers Supabase (sauvegardes partagées + cache de géocodage). Nécessite
+  `npm install` (dépendances listées dans `package.json`) — Vercel s'en charge automatiquement au
+  déploiement.
+- `supabase_users_table.sql` / `supabase_lockdown_existing_tables.sql` — migrations SQL à exécuter
+  manuellement dans l'éditeur SQL Supabase (cf. « Mise en place » ci-dessus).
 
 ## Fonctionnement
 
-1. Ouvrir `index.html` dans un navigateur.
-2. Importer un fichier PSP au format Excel (.xlsx) construit sur le gabarit Cellance.
-3. Explorer les vues : Vue d'ensemble, Base de cotation, Investissements & simulation, Décarbonation & DPE, Actions identifiées, Analyse libre (tableau croisé dynamique), Cartographie.
+1. Ouvrir l'URL de déploiement (Vercel) de l'outil — `index.html` seul, ouvert en local sans le
+   backend `api/` déployé à côté, n'affichera que l'écran de connexion sans jamais pouvoir s'y
+   connecter (cf. « Authentification » ci-dessus).
+2. Se connecter (ou créer le premier compte si aucun n'existe encore).
+3. Importer un fichier PSP au format Excel (.xlsx) construit sur le gabarit Cellance.
+4. Explorer les vues : Vue d'ensemble, Base de cotation, Investissements & simulation, Décarbonation & DPE, Actions identifiées, Analyse libre (tableau croisé dynamique), Cartographie.
 
 Le moteur de parsing (`<script id="engine-source">`) détecte les colonnes par nom d'en-tête (regex), pas par position fixe, pour rester robuste aux variations d'un fichier bailleur à l'autre. Le contrôle de conformité à l'import ne bloque que sur l'absence du socle (onglet « Base de cotation » avec la colonne « Code de Résidence ») ; l'absence d'un module optionnel (Actions identifiées, grille de gains DPE) dégrade simplement les vues concernées.
 

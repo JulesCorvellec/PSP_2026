@@ -1,12 +1,17 @@
 {
   "name": "psp-2026",
   "private": true,
-  "version": "1.5.0",
-  "description": "Outils de développement (tests) pour l'app PSP (index.html, sans build en production).",
+  "version": "1.6.0",
+  "description": "App PSP (index.html, sans build) + backend d'authentification et de proxy Supabase (dossier api/, Vercel Serverless Functions).",
   "type": "module",
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.4",
+    "bcryptjs": "^2.4.3",
+    "jsonwebtoken": "^9.0.2"
   },
   "devDependencies": {
     "vitest": "^2.1.9"
