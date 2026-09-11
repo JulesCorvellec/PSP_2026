@@ -1,10 +1,12 @@
 import { getSupabaseAdmin } from '../../_lib/supabaseAdmin.js';
 import { requireAdmin } from '../../_lib/auth.js';
 import { hashPassword } from '../../_lib/passwords.js';
+import { requireMethod, withErrors } from '../../_lib/http.js';
 
-export default async function handler(req, res) {
+async function handler(req, res) {
   const admin = requireAdmin(req, res);
   if (!admin) return;
+  if (!requireMethod(req, res, 'GET', 'POST')) return;
   const sb = getSupabaseAdmin();
 
   if (req.method === 'GET') {
@@ -33,6 +35,6 @@ export default async function handler(req, res) {
     }
     return res.status(201).json({ user: data });
   }
-
-  res.status(405).json({ error: 'Méthode non autorisée.' });
 }
+
+export default withErrors(handler);

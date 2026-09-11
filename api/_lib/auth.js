@@ -18,8 +18,13 @@ export function signToken(user) {
 }
 
 export function verifyToken(token) {
+  // getSecret() volontairement HORS du try/catch ci-dessous : une erreur de configuration serveur
+  // (JWT_SECRET manquant) ne doit pas être confondue avec un token invalide/expiré (qui doit se
+  // traduire par un 401 "session expirée" normal) — elle doit remonter telle quelle pour être loguée
+  // et renvoyer un vrai 500 (cf. withErrors dans api/_lib/http.js), pas un faux "session expirée".
+  const secret = getSecret();
   try {
-    return jwt.verify(token, getSecret());
+    return jwt.verify(token, secret);
   } catch (e) {
     return null; // signature invalide OU expiré (jwt.verify lève dans les deux cas) — dans tous les
     // cas, le front doit être renvoyé vers la page de login (cf. requireAuth ci-dessous).
@@ -33,7 +38,13 @@ function parseCookies(header) {
     if (idx === -1) return;
     const k = part.slice(0, idx).trim();
     const v = part.slice(idx + 1).trim();
-    if (k) out[k] = decodeURIComponent(v);
+    if (!k) return;
+    try {
+      out[k] = decodeURIComponent(v);
+    } catch (e) {
+      // valeur de cookie mal encodée (ex. "%" isolé) : ignorée plutôt que de faire planter toute la
+      // requête avec une exception non interceptée.
+    }
   });
   return out;
 }

@@ -1,12 +1,13 @@
 import { getSupabaseAdmin } from '../_lib/supabaseAdmin.js';
 import { verifyPassword, verifyAgainstDummy } from '../_lib/passwords.js';
 import { signToken, setSessionCookie } from '../_lib/auth.js';
+import { requireMethod, withErrors } from '../_lib/http.js';
 
 const MAX_ATTEMPTS = 5;
 const LOCK_MINUTES = 15;
 
-export default async function handler(req, res) {
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Méthode non autorisée.' });
+async function handler(req, res) {
+  if (!requireMethod(req, res, 'POST')) return;
   const { email, password } = req.body || {};
   if (!email || !password) return res.status(400).json({ error: 'Email et mot de passe requis.' });
 
@@ -26,13 +27,14 @@ export default async function handler(req, res) {
 
   const ok = await verifyPassword(password, user.password_hash);
   if (!ok) {
-    const attempts = (user.failed_attempts || 0) + 1;
-    const patch = { failed_attempts: attempts };
-    if (attempts >= MAX_ATTEMPTS) {
-      patch.locked_until = new Date(Date.now() + LOCK_MINUTES * 60000).toISOString();
-      patch.failed_attempts = 0;
-    }
-    await sb.from('psp_users').update(patch).eq('id', user.id);
+    // Incrément atomique côté base (une seule instruction UPDATE, cf. supabase_race_condition_fixes.sql)
+    // plutôt qu'un lire-puis-écrire ici : des tentatives concurrentes sur le même compte ne doivent pas
+    // pouvoir se lire mutuellement une valeur périmée et faire manquer le verrouillage après 5 échecs.
+    await sb.rpc('psp_register_login_failure', {
+      p_user_id: user.id,
+      p_max_attempts: MAX_ATTEMPTS,
+      p_lock_minutes: LOCK_MINUTES,
+    });
     return res.status(401).json({ error: 'Identifiants invalides.' });
   }
 
@@ -44,3 +46,5 @@ export default async function handler(req, res) {
   setSessionCookie(res, token);
   res.status(200).json({ user: { id: user.id, email: user.email, isAdmin: user.is_admin } });
 }
+
+export default withErrors(handler);

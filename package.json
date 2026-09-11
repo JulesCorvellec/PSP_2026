@@ -1,7 +1,7 @@
 {
   "name": "psp-2026",
   "private": true,
-  "version": "1.6.0",
+  "version": "1.6.1",
   "description": "App PSP (index.html, sans build) + backend d'authentification et de proxy Supabase (dossier api/, Vercel Serverless Functions).",
   "type": "module",
   "scripts": {

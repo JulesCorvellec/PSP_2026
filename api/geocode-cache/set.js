@@ -1,12 +1,13 @@
 import { getSupabaseAdmin } from '../_lib/supabaseAdmin.js';
 import { requireAuth } from '../_lib/auth.js';
+import { requireMethod, withErrors } from '../_lib/http.js';
 
 const TABLE = 'psp_geocode_cache';
 
-export default async function handler(req, res) {
+async function handler(req, res) {
   const user = requireAuth(req, res);
   if (!user) return;
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Méthode non autorisée.' });
+  if (!requireMethod(req, res, 'POST')) return;
   const { entries } = req.body || {};
   if (!Array.isArray(entries) || !entries.length) return res.status(200).json({ ok: true });
 
@@ -34,3 +35,5 @@ export default async function handler(req, res) {
     res.status(200).json({ ok: false });
   }
 }
+
+export default withErrors(handler);

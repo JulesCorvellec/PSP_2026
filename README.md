@@ -26,7 +26,11 @@ détient la clé `service_role` Supabase et signe les jetons de session.
 
 1. **Table utilisateurs** — dans l'éditeur SQL du projet Supabase déjà utilisé pour les sauvegardes/le
    cache de géocodage, exécuter `supabase_users_table.sql` (à la racine du dépôt).
-2. **Variables d'environnement du backend** — dans Vercel (Project Settings → Environment Variables),
+2. **Fonctions SQL anti-concurrence** — exécuter ensuite `supabase_race_condition_fixes.sql` (même
+   éditeur SQL) : indispensable avant le déploiement, car le backend appelle ces fonctions (verrouillage
+   de compte après échecs de connexion, création du premier compte admin, bascule de l'import « base »)
+   — sans elles, ces actions échoueront avec une erreur serveur.
+3. **Variables d'environnement du backend** — dans Vercel (Project Settings → Environment Variables),
    définir (jamais dans un fichier commité — cf. `.env.local.example` pour tester en local avec
    `vercel dev`) :
    - `SUPABASE_URL` — même projet Supabase que celui déjà utilisé (Project Settings → API → Project URL).
@@ -34,10 +38,10 @@ détient la clé `service_role` Supabase et signe les jetons de session.
      à ne jamais confondre avec l'ancienne clé `anon` (retirée du frontend, à considérer comme
      compromise puisque visible dans l'historique Git — cf. étape 4).
    - `JWT_SECRET` — chaîne aléatoire longue, générée une fois : `node -e "console.log(require('crypto').randomBytes(48).toString('base64'))"`.
-3. **Déployer**, puis ouvrir l'outil : l'écran de création du premier compte administrateur s'affiche
+4. **Déployer**, puis ouvrir l'outil : l'écran de création du premier compte administrateur s'affiche
    automatiquement (aucun compte n'existe encore). Les comptes suivants se créent depuis
    Administration une fois connecté.
-4. **Verrouillage des tables existantes** (recommandé, après avoir vérifié que la connexion et les
+5. **Verrouillage des tables existantes** (recommandé, après avoir vérifié que la connexion et les
    sauvegardes fonctionnent) — exécuter `supabase_lockdown_existing_tables.sql` pour retirer les
    anciennes policies RLS ouvertes à quiconque connaît la clé `anon` (le backend utilise
    `service_role`, qui contourne RLS et n'a besoin d'aucune policy). Envisager aussi de régénérer la
@@ -50,8 +54,8 @@ détient la clé `service_role` Supabase et signe les jetons de session.
   comptes, et proxy vers Supabase (sauvegardes partagées + cache de géocodage). Nécessite
   `npm install` (dépendances listées dans `package.json`) — Vercel s'en charge automatiquement au
   déploiement.
-- `supabase_users_table.sql` / `supabase_lockdown_existing_tables.sql` — migrations SQL à exécuter
-  manuellement dans l'éditeur SQL Supabase (cf. « Mise en place » ci-dessus).
+- `supabase_users_table.sql` / `supabase_race_condition_fixes.sql` / `supabase_lockdown_existing_tables.sql`
+  — migrations SQL à exécuter manuellement dans l'éditeur SQL Supabase (cf. « Mise en place » ci-dessus).
 
 ## Fonctionnement
 

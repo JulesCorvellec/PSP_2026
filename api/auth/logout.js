@@ -1,7 +1,10 @@
 import { clearSessionCookie } from '../_lib/auth.js';
+import { requireMethod, withErrors } from '../_lib/http.js';
 
-export default async function handler(req, res) {
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Méthode non autorisée.' });
+async function handler(req, res) {
+  if (!requireMethod(req, res, 'POST')) return;
   clearSessionCookie(res);
   res.status(200).json({ ok: true });
 }
+
+export default withErrors(handler);

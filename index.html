@@ -937,9 +937,23 @@ function useGeocoding(residences){
 let onUnauthorized = null;
 function setUnauthorizedHandler(fn){ onUnauthorized = fn; }
 async function apiFetch(path, options){
-  const res = await fetch(path, Object.assign({ credentials:'include' }, options||{}, {
-    headers: Object.assign({ 'Content-Type':'application/json' }, (options && options.headers) || {}),
-  }));
+  const opts = Object.assign({ credentials:'include' }, options||{});
+  const headers = Object.assign({ 'Content-Type':'application/json' }, (options && options.headers) || {});
+  // Une sauvegarde peut embarquer un import complet (plusieurs Mo une fois sérialisé) : Vercel plafonne
+  // le corps d'une requête à environ 4,5 Mo côté plateforme, une limite qu'on ne peut pas relever
+  // autrement. Au-delà d'un seuil, on compresse (gzip) plutôt que d'envoyer le JSON brut ; le corps est
+  // alors lu et décompressé côté serveur (cf. api/_lib/http.js#readJsonBody). Sans CompressionStream
+  // (navigateur ancien), on retombe simplement sur l'envoi non compressé.
+  if (typeof opts.body === 'string' && opts.body.length > 100000 && typeof CompressionStream === 'function'){
+    try {
+      const stream = new Blob([opts.body]).stream().pipeThrough(new CompressionStream('gzip'));
+      opts.body = await new Response(stream).arrayBuffer();
+      headers['Content-Type'] = 'application/octet-stream';
+      headers['Content-Encoding'] = 'gzip';
+    } catch(e){ /* compression indisponible : corps envoyé tel quel (JSON non compressé) */ }
+  }
+  opts.headers = headers;
+  const res = await fetch(path, opts);
   if (res.status===401){
     if (onUnauthorized) onUnauthorized();
     throw new Error('Session expirée.');
@@ -1257,17 +1271,21 @@ function ImportScreen({onLoaded, onRestore, onBaseChanged, currentUser, onLogout
       let obj;
       try { obj = JSON.parse(e.target.result); } catch(err){ setImportJsonError("Le fichier n'est pas un JSON valide."); return; }
       if (!isValidSaveRecord(obj)){ setImportJsonError("Ce fichier ne correspond pas au format attendu d'une sauvegarde PSP (structure inattendue — clés « data »/« simOperations » manquantes)."); return; }
-      const all = await idbGetAll();
-      let nom = obj.nom || 'Import importé';
-      if (all.some((r)=>r.nom===nom)) nom = nom + ' (import)';
-      const record = buildSaveRecord({
-        nom, nomFichierSource: obj.nomFichierSource, gabaritComplet: obj.gabaritComplet, nbCols: obj.nbCols,
-        data: obj.data, simOperations: obj.simOperations, budgetLignes: migrateBudgetLignes(obj), offreNouvelleLgt: obj.offreNouvelleLgt||{}, ventesSimulees: obj.ventesSimulees||[],
-        includeIdentifiees: obj.includeIdentifiees!==undefined? obj.includeIdentifiees : true,
-        estBase: false,
-      });
-      try { await idbPut(record); await refreshSaves(); }
-      catch(err){ setImportJsonError("Échec de l'enregistrement (connexion au service de sauvegarde partagée impossible)."); }
+      // idbGetAll (comme idbPut) rejette désormais si la session a expiré : englobé dans le même
+      // try/catch que idbPut ci-dessous, sinon un rejet ici faisait échouer l'import en silence (aucun
+      // message d'erreur affiché).
+      try {
+        const all = await idbGetAll();
+        let nom = obj.nom || 'Import importé';
+        if (all.some((r)=>r.nom===nom)) nom = nom + ' (import)';
+        const record = buildSaveRecord({
+          nom, nomFichierSource: obj.nomFichierSource, gabaritComplet: obj.gabaritComplet, nbCols: obj.nbCols,
+          data: obj.data, simOperations: obj.simOperations, budgetLignes: migrateBudgetLignes(obj), offreNouvelleLgt: obj.offreNouvelleLgt||{}, ventesSimulees: obj.ventesSimulees||[],
+          includeIdentifiees: obj.includeIdentifiees!==undefined? obj.includeIdentifiees : true,
+          estBase: false,
+        });
+        await idbPut(record); await refreshSaves();
+      } catch(err){ setImportJsonError("Échec de l'enregistrement (connexion au service de sauvegarde partagée impossible)."); }
     };
     reader.onerror = ()=>setImportJsonError("Impossible de lire ce fichier.");
     reader.readAsText(file);
@@ -4978,12 +4996,14 @@ function ViewComparatif({currentSnapshot}){
 
   useEffect(()=>{
     let cancelled = false;
+    // .catch() nécessaire depuis que idbGetAll rejette sur session expirée (12h) : sans lui, un rejet
+    // laissait la liste de comparaison silencieusement vide, sans aucune indication à l'utilisateur.
     idbGetAll().then((all)=>{
       if (cancelled) return;
       setSaves(all);
       const base = all.find((s)=>s.estBase);
       setVersionAId((prev)=> prev || (base? base.id : (all[0]? all[0].id : 'current')));
-    });
+    }).catch((e)=>{ /* déjà géré globalement : apiFetch déclenche onUnauthorized/l'écran de connexion sur 401 */ });
     return ()=>{ cancelled = true; };
   }, []);
 
@@ -5478,10 +5498,15 @@ function App({currentUser, onLogout}){
   useEffect(()=>{
     let cancelled = false;
     (async()=>{
-      const all = await idbGetAll();
-      const baseRaw = all.find((r)=>r.estBase) || null;
-      const base = baseRaw? Object.assign({}, baseRaw, {budgetLignes: migrateBudgetLignes(baseRaw)}) : null;
-      if (!cancelled){ setBaseImport(base); setSavesCount(all.length); }
+      // idbGetAll rejette si la session a expiré (12h) : sans ce try/catch, le rejet restait non
+      // intercepté (base import/compteur silencieusement figés, sans message d'erreur) — au lieu de la
+      // redirection vers l'écran de connexion normalement déclenchée ailleurs par onUnauthorized.
+      try {
+        const all = await idbGetAll();
+        const baseRaw = all.find((r)=>r.estBase) || null;
+        const base = baseRaw? Object.assign({}, baseRaw, {budgetLignes: migrateBudgetLignes(baseRaw)}) : null;
+        if (!cancelled){ setBaseImport(base); setSavesCount(all.length); }
+      } catch(e){ /* déjà géré globalement : apiFetch déclenche onUnauthorized/l'écran de connexion sur 401 */ }
     })();
     return ()=>{ cancelled = true; };
   }, [baseRefreshTick]);
@@ -5551,18 +5576,21 @@ function App({currentUser, onLogout}){
   function resetSimulation(){ setSimOperationsRaw(data.operations.map((o)=>Object.assign({},o))); setBudgetLignesRaw([]); setOffreNouvelleLgtRaw({}); setVentesSimuleesRaw([]); setFinanceSeuilsRaw({}); setCustomPivotViewsRaw([]); setIncludeIdentifiees(true); setDirty(false); }
 
   async function doSaveCurrent(name, asNew){
-    const existing = (!asNew && currentSaveId) ? await idbGet(currentSaveId) : null;
-    const record = buildSaveRecord({
-      id: existing? existing.id : undefined,
-      nom: name,
-      nomFichierSource: data.fileName,
-      gabaritComplet: data.gabaritComplet,
-      nbCols: data.nbCols,
-      data, simOperations, budgetLignes, offreNouvelleLgt, ventesSimulees, includeIdentifiees, financeSeuils, customPivotViews,
-      estBase: existing? existing.estBase : false,
-      dateCreation: existing? existing.dateCreation : undefined,
-    });
+    // idbGet (comme idbPut) rejette désormais si la session a expiré (12h) : englobé dans le même
+    // try/catch que le reste, sinon un rejet non intercepté ici faisait échouer la sauvegarde en
+    // silence (aucun toast), en particulier après une longue session de travail.
     try {
+      const existing = (!asNew && currentSaveId) ? await idbGet(currentSaveId) : null;
+      const record = buildSaveRecord({
+        id: existing? existing.id : undefined,
+        nom: name,
+        nomFichierSource: data.fileName,
+        gabaritComplet: data.gabaritComplet,
+        nbCols: data.nbCols,
+        data, simOperations, budgetLignes, offreNouvelleLgt, ventesSimulees, includeIdentifiees, financeSeuils, customPivotViews,
+        estBase: existing? existing.estBase : false,
+        dateCreation: existing? existing.dateCreation : undefined,
+      });
       await idbPut(record);
       setCurrentSaveId(record.id);
       setShowSaveModal(false);
