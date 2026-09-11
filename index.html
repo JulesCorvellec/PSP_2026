@@ -3648,6 +3648,10 @@ function ViewInvestissements({residences, operations, setOperations, includeIden
   const [editingLigneName, setEditingLigneName] = useState('');
   const [onlyEcarts, setOnlyEcarts] = useState(true);
   const [showDisparues, setShowDisparues] = useState(false);
+  // §V8 Phase 6 — famille retenue pour le graphique « Volume d'intervention et montants par année ».
+  // Défaut Réhabilitation : c'est la famille qui porte l'arbitrage volume/montant, les RC étant trop
+  // nombreux et trop petits pour qu'une lecture par volume y soit parlante.
+  const [volFamille, setVolFamille] = useState('Réhabilitation');
   const years = useMemo(()=>computeYearsRange(operations), [operations]);
   const resByCode = useMemo(()=>{ const m={}; residences.forEach((r)=>m[r.code]=r); return m; }, [residences]);
 
@@ -3663,6 +3667,41 @@ function ViewInvestissements({residences, operations, setOperations, includeIden
   }, [visibleOps, years]);
 
   const totalByYear = years.map((y)=> families.reduce((s,f)=>s+(aggregation.agg[f][y]||0),0) + sumBudgetLignesYear(budgetLignes, y));
+
+  // §V8 Phase 6 — seconde lecture du MÊME jeu d'opérations que l'agrégation ci-dessus : le volume en
+  // logements là où la première donne le montant en euros. Deux écueils traités ici :
+  //   - o.logements peut être nul. On ne substitue JAMAIS r.nbLgt : une opération ne porte pas
+  //     nécessairement sur toute la résidence, ce serait une surestimation silencieuse. Les opérations
+  //     sans volume sont comptées et affichées sous le graphique.
+  //   - le montant moyen par logement n'a de sens que sur les opérations ayant À LA FOIS un montant et
+  //     un volume : il est calculé sur ce seul sous-ensemble, avec son taux de couverture.
+  // Les lignes budgétaires libres sont exclues des deux séries (elles n'ont pas de volume) pour que
+  // barres et courbe portent exactement le même périmètre.
+  const volumeMontants = useMemo(()=>{
+    const ops = visibleOps.filter((o)=> o.annee!==null && years.includes(o.annee)
+      && (volFamille==='Toutes' || familyOfType(o.type)===volFamille));
+    const vide = ()=>{ const m={}; years.forEach((y)=>m[y]=0); return m; };
+    const volProgramme = vide(), volIdentifie = vide(), montantParAnnee = vide();
+    let sansVolume = 0, totalMontant = 0, totalLogements = 0;
+    let nComplet = 0, montantComplet = 0, logementsComplet = 0;
+    ops.forEach((o)=>{
+      const lgt = Number(o.logements) || 0;
+      if (!lgt) sansVolume++;
+      if (o.statut==='identifie') volIdentifie[o.annee] += lgt; else volProgramme[o.annee] += lgt;
+      montantParAnnee[o.annee] += (o.montant||0);
+      totalMontant += (o.montant||0);
+      totalLogements += lgt;
+      if (lgt && o.montant){ nComplet++; montantComplet += o.montant; logementsComplet += lgt; }
+    });
+    return {
+      nbOps: ops.length, sansVolume, totalMontant, totalLogements,
+      programme: years.map((y)=>volProgramme[y]),
+      identifie: years.map((y)=>volIdentifie[y]),
+      montants: years.map((y)=>montantParAnnee[y]),
+      moyenneParLgt: logementsComplet>0 ? montantComplet/logementsComplet : null,
+      couvertureOps: nComplet,
+    };
+  }, [visibleOps, years, volFamille]);
 
   // §5.1 — même agrégation par famille que ci-dessus, mais sur les opérations de la Base, pour la
   // 2ème série de barres empilées atténuées du graphique "Évolution des investissements".
@@ -3967,6 +4006,63 @@ function ViewInvestissements({residences, operations, setOperations, includeIden
               );
             }} />
         )}
+      </div>
+
+      {/* §V8 Phase 6 — placée juste sous « Évolution des investissements » : c'est la même série
+          d'opérations lue en volume plutôt qu'en euros, et les deux graphiques se lisent sur le même
+          axe d'années sans défilement. La reléguer dans un onglet séparé casserait ce lien. */}
+      <div className="ce-card">
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10,flexWrap:'wrap',gap:8}}>
+          <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700}}>Volume d'intervention et montants par année</h2>
+          <select className="ce-select" style={{width:220}} value={volFamille} onChange={(e)=>setVolFamille(e.target.value)}>
+            {families.map((f)=><option key={f} value={f}>{f}</option>)}
+            <option value="Toutes">Toutes les familles</option>
+          </select>
+        </div>
+        <ChartCanvas type="bar" height={300} data={{
+          labels: years,
+          datasets: [
+            { type:'bar', label:'Logements — Programmé', data: volumeMontants.programme, backgroundColor:'#009261', stack:'vol', borderRadius:4 },
+            // Quand « Inclure les opérations identifiées » est décochée, la pile disparaît — elle ne
+            // devient pas grise : une barre à zéro se lirait comme « aucune opération identifiée ».
+            ...(includeIdentifiees ? [{ type:'bar', label:'Logements — Identifié', data: volumeMontants.identifie, backgroundColor:'#58D88B', stack:'vol', borderRadius:4 }] : []),
+            { type:'line', label:'Montants investis (M€)', data: volumeMontants.montants.map((m)=>m/1e6), borderColor:'#264E46', backgroundColor:'#264E46', pointRadius:3, fill:false, yAxisID:'y1' },
+          ]
+        }} options={{
+          scales:{
+            x:{ stacked:true },
+            y:{ stacked:true, beginAtZero:true, title:{display:true,text:'Logements concernés'} },
+            y1:{ beginAtZero:true, position:'right', grid:{drawOnChartArea:false}, title:{display:true,text:'Montants (M€)'} },
+          }
+        }} />
+        <div style={{display:'flex',gap:12,flexWrap:'wrap',marginTop:14}}>
+          <div style={{flex:1,minWidth:180,background:'#f6faf8',borderRadius:8,padding:'10px 14px'}}>
+            <div style={{fontSize:'.68rem',color:'var(--ce-vert-fonce)'}}>Total investi</div>
+            <div style={{fontSize:'1.05rem',fontWeight:700,color:'var(--ce-vert-tres-fonce)'}}>{fmtEur(volumeMontants.totalMontant)}</div>
+          </div>
+          <div style={{flex:1,minWidth:180,background:'#f6faf8',borderRadius:8,padding:'10px 14px'}}>
+            <div style={{fontSize:'.68rem',color:'var(--ce-vert-fonce)'}}>Logements concernés</div>
+            <div style={{fontSize:'1.05rem',fontWeight:700,color:'var(--ce-vert-tres-fonce)'}}>{fmtNum(volumeMontants.totalLogements)}</div>
+          </div>
+          <div style={{flex:1,minWidth:180,background:'#f6faf8',borderRadius:8,padding:'10px 14px'}}>
+            <div style={{fontSize:'.68rem',color:'var(--ce-vert-fonce)'}}>Montant moyen / logement</div>
+            <div style={{fontSize:'1.05rem',fontWeight:700,color:'var(--ce-vert-tres-fonce)'}}>{volumeMontants.moyenneParLgt!==null? fmtEur(volumeMontants.moyenneParLgt) : '—'}</div>
+            <div style={{fontSize:'.64rem',color:'#9fb3ae',marginTop:2}}>
+              {volumeMontants.moyenneParLgt!==null
+                ? 'calculé sur '+volumeMontants.couvertureOps+' opération'+(volumeMontants.couvertureOps>1?'s':'')+' sur '+volumeMontants.nbOps
+                : 'aucune opération ne porte à la fois un montant et un volume'}
+            </div>
+          </div>
+        </div>
+        <p style={{fontSize:'.7rem',color:'var(--ce-vert-fonce)',marginTop:10,lineHeight:1.5}}>
+          Les barres empilent le nombre de logements concernés par année, réparti entre opérations programmées
+          et identifiées ; la courbe donne les montants investis sur le même périmètre, en millions d'euros
+          (axe de droite). Le montant moyen par logement n'est calculé que sur les opérations portant à la fois
+          un montant et un volume.
+          {volumeMontants.sansVolume>0 && ' '+volumeMontants.sansVolume+' opération'+(volumeMontants.sansVolume>1?'s':'')+' sur '+volumeMontants.nbOps+' ne renseigne'+(volumeMontants.sansVolume>1?'nt':'')+' aucun volume en logements : elle'+(volumeMontants.sansVolume>1?'s comptent':' compte')+' dans les montants, pas dans les barres.'}
+          {' '}Les lignes budgétaires libres sont exclues de ce graphique — barres comme courbe — car elles ne
+          portent pas de volume en logements.
+        </p>
       </div>
 
       <div className="ce-card">
