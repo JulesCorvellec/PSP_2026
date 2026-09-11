@@ -552,6 +552,159 @@ function parseGainsDPE(matrix){
   return grid;
 }
 
+/* ---- V8 §1.1 — Échéancier de cessions (onglet « 5. Cessions identifiées ») ----
+   Module strictement OPTIONNEL : l'onglet est absent de la plupart des fichiers clients, son absence
+   ne doit jamais bloquer ni ralentir un import (cf. V8 §10.4). Contrairement aux colonnes vente de la
+   Base de cotation — des données de stock, sans dimension année — cet onglet porte un échéancier
+   annuel complet, seule source importable d'un plan de vente daté.
+
+   Vérifié le 2026-09-11 sur Base patrimoniale_PSP STANDARD v2.xlsx : 150 lignes × 367 colonnes,
+   en-tête ligne 2 (détectée, jamais présumée), 3 lignes réellement peuplées, 5 familles annualisées
+   couvrant 2023→2072. Sur ce gabarit, les familles « Nb logts » et « Mois cession » sont
+   INTÉGRALEMENT vides (0 colonne sur 50 porte une valeur) : un échéancier importé peut donc
+   parfaitement n'avoir aucun volume, seulement des prix. Ce n'est pas une anomalie à corriger, c'est
+   le cas nominal — d'où le filtrage par « année portant au moins une valeur » plus bas, et non par
+   « année portant un nbLgt ». */
+// Préfixes des familles de colonnes annualisées, testés sur le libellé NORMALISÉ après retrait de
+// l'année. Les libellés réels comportent des espaces doubles, des variantes d'accentuation et des
+// symboles monétaires : d'où les tolérances (k€/ke, espaces optionnels autour du séparateur).
+const CESSION_FAMILLES = [
+  { cle:'mois',              re:/^mois cession$/,                                   unite:'mois'  },
+  { cle:'nbLgt',             re:/^nb logts?$/,                                      unite:'lgt'   },
+  { cle:'prixUnitaire',      re:/^prix net de cession k[€e]\s*\/\s*logts?$/,        unite:'kEuro' },
+  { cle:'valeurComptable',   re:/^valeur comptable en k[€e]\s*\/\s*lgt cede$/,      unite:'kEuro' },
+  { cle:'remboursement',     re:/^remboursements? anticipes? en k[€e]$/,            unite:'kEuro' },
+];
+function parseCessionsIdentifiees(matrix){
+  const headerRowIdx = findHeaderRow(matrix, (row)=>row.some((c)=>/^n ?groupe$|^no groupe$/.test(ceNorm(c))));
+  if (headerRowIdx===-1) return null;
+  const header = matrix[headerRowIdx];
+  const idx = {
+    numeroGroupe: findColIndex(header,[/^n ?groupe$/,/^no groupe$/]),
+    sousGroupe:   findColIndex(header,[/^n ?sous ?-? ?groupe$/]),
+    nomGroupe:    findColIndex(header,[/^nom du groupe$/]),
+    nbLgtTotal:   findColIndex(header,[/^nb de logts$/]),
+    codeInsee:    findColIndex(header,[/^code insee$/]),
+    nature:       findColIndex(header,[/^nature$/]),
+  };
+  if (idx.numeroGroupe<0) return null;
+  // Familles annualisées : on isole l'année en suffixe PUIS on teste le préfixe, plutôt que d'embarquer
+  // \d{4} dans chaque motif — sinon les familles hors périmètre (« Économies d'annuités cumulée suite
+  // à RA — part capital YYYY », dont le gabarit de démo n'est que du remplissage) seraient à exclure
+  // une par une au lieu de simplement ne matcher aucun préfixe connu.
+  const colsAnnuelles = [];
+  header.forEach((cell, i)=>{
+    const m = /^(.*?)\s*(\d{4})$/.exec(ceNorm(cell));
+    if (!m) return;
+    const fam = CESSION_FAMILLES.find((f)=>f.re.test(m[1]));
+    if (fam) colsAnnuelles.push({ cle:fam.cle, unite:fam.unite, annee:Number(m[2]), col:i });
+  });
+  // Le gabarit prévoit 150 lignes dont une poignée seulement sont utilisées : les lignes vides
+  // portent un n° de groupe vide ou littéralement 0, jamais un vrai code.
+  const lignes = [];
+  for (let r=headerRowIdx+1; r<matrix.length; r++){
+    const row = matrix[r]||[];
+    const brut = row[idx.numeroGroupe];
+    if (brut===null || brut===undefined || String(brut).trim()==='' || String(brut).trim()==='0') continue;
+    const parAnnee = {};
+    colsAnnuelles.forEach((c)=>{
+      const v = row[c.col];
+      if (v===null || v===undefined || String(v).trim()==='') return;
+      if (!parAnnee[c.annee]) parAnnee[c.annee] = {};
+      if (c.unite==='mois'){ parAnnee[c.annee].mois = v; return; }
+      const n = ceNum(v);
+      if (n===null) return;
+      // Les montants sont exprimés en k€ PAR LOGEMENT dans cet onglet, là où « Prix de vente "brut"
+      // Total » de la Base de cotation est en € totaux. On convertit ici, à la lecture, pour que le
+      // modèle interne soit homogène en euros — jamais à l'affichage, sinon les deux sources
+      // finiraient additionnées sans conversion quelque part.
+      parAnnee[c.annee][c.cle] = c.unite==='kEuro' ? n*1000 : n;
+    });
+    // Une année sans aucune valeur n'est pas un échéancier : on ne la conserve pas.
+    Object.keys(parAnnee).forEach((y)=>{ if (!Object.keys(parAnnee[y]).length) delete parAnnee[y]; });
+    lignes.push({
+      numeroGroupe: brut,
+      sousGroupe:   idx.sousGroupe>=0? row[idx.sousGroupe] : null,
+      nomGroupe:    idx.nomGroupe>=0? row[idx.nomGroupe] : null,
+      nbLgtTotal:   idx.nbLgtTotal>=0? ceNum(row[idx.nbLgtTotal]) : null,
+      codeInsee:    idx.codeInsee>=0? row[idx.codeInsee] : null,
+      nature:       idx.nature>=0? row[idx.nature] : null,
+      parAnnee: parAnnee,
+    });
+  }
+  return { headerRowIdx, lignes, anneesDetectees: [...new Set(colsAnnuelles.map((c)=>c.annee))].sort((a,b)=>a-b) };
+}
+// V8 §1.2 — l'onglet est clé par N° groupe + Nom du groupe, jamais par Code de Résidence : d'où
+// l'appariement par code PUIS le repli par nom normalisé. Les lignes non appariées ne sont jamais
+// silencieusement ignorées, elles alimentent un avertissement à l'import (même modèle que
+// duplicateCodes).
+function matchCessionsToResidences(cessions, residences){
+  const out = { parResCode:{}, orphelines:[] };
+  if (!cessions || !cessions.lignes) return out;
+  const parCode = {}, parNom = {};
+  (residences||[]).forEach((r)=>{
+    parCode[String(r.code)] = r;
+    const n = ceNorm(r.nom);
+    // Un nom en doublon ne peut pas servir de clé de repli : on neutralise plutôt que d'apparier au
+    // hasard sur la première occurrence rencontrée.
+    if (n) parNom[n] = (parNom[n]===undefined) ? r : null;
+  });
+  cessions.lignes.forEach((l)=>{
+    let res = parCode[String(l.numeroGroupe)] || null;
+    let via = res? 'code' : null;
+    if (!res){ const c = parNom[ceNorm(l.nomGroupe)]; if (c){ res = c; via = 'nom'; } }
+    if (!res){ out.orphelines.push(l); return; }
+    // Deux lignes de cessions peuvent viser la même résidence (sous-groupes, tranches) : on fusionne
+    // leurs échéanciers année par année plutôt que d'écraser la première.
+    const cible = out.parResCode[res.code] || (out.parResCode[res.code] = { resCode:res.code, via:via, parAnnee:{}, nature:l.nature });
+    Object.keys(l.parAnnee).forEach((y)=>{
+      const src = l.parAnnee[y];
+      const dst = cible.parAnnee[y] || (cible.parAnnee[y] = {});
+      Object.keys(src).forEach((k)=>{
+        // nbLgt s'additionne (deux tranches cédées la même année) ; un prix unitaire ne s'additionne
+        // pas, on garde la première valeur rencontrée.
+        if (k==='nbLgt') dst.nbLgt = (dst.nbLgt||0) + src.nbLgt;
+        else if (dst[k]===undefined) dst[k] = src[k];
+      });
+    });
+  });
+  return out;
+}
+// V8 §1.3 — construction des lignes de plan de vente issues de l'import. Deux sources, une seule
+// ligne par résidence : les colonnes vente de la Base de cotation (stock, sans année) et l'échéancier
+// de « 5. Cessions identifiées » (daté). Quand les deux existent pour une même résidence, on garde
+// l'origine « import-cotation » (c'est bien le plan de vente du bailleur) et on lui attache
+// l'échéancier — plutôt que de créer deux lignes qui se compteraient deux fois dans les cumuls.
+// Les identifiants sont dérivés du code résidence (pas aléatoires) pour qu'un même import produise
+// toujours les mêmes ids : sans cela, deux rechargements d'un même fichier donneraient des lignes
+// considérées comme distinctes lors d'une comparaison avec la version base.
+function buildPlanVenteInitial(residences, cessionsParResCode){
+  const parRes = cessionsParResCode || {};
+  const lignes = [];
+  (residences||[]).forEach((r)=>{
+    const enCotation = (r.planVente && String(r.planVente).trim()!=='') || (r.nbLgtMiseVente||0) > 0;
+    const ech = parRes[r.code] || null;
+    if (!enCotation && !ech) return;
+    lignes.push({
+      id: 'pv_' + r.code,
+      resCode: r.code,
+      origine: enCotation ? 'import-cotation' : 'import-cessions',
+      retenue: true,
+      typeVente: r.typeVente || null,
+      conventionne: r.conventionneVente || null,
+      logementsTotal: r.nbLgt || null,
+      parAnnee: ech ? ech.parAnnee : {},
+      prioriteManuelle: null,
+      scorePotentiel: null,
+      commentaire: null,
+      // Valeurs de stock de la Base de cotation : conservées telles quelles, sans être réparties
+      // arbitrairement sur des années qui n'existent pas dans le fichier (cf. V8 §1.3).
+      _legacyLogementsRestants: r.nbLgtRestantVente!==undefined? r.nbLgtRestantVente : null,
+      _legacyPrixVente: r.prixVenteBrut!==undefined? r.prixVenteBrut : null,
+    });
+  });
+  return lignes;
+}
 
 /* ---- Cascade DPE (cahier des charges §8.2) ---- */
 const CLASS_ORDER = ['G','F','E','D','C','B','A'];
@@ -1035,7 +1188,38 @@ function migrateBudgetLignes(rec){
   }
   return [];
 }
-function buildSaveRecord({id, nom, nomFichierSource, gabaritComplet, nbCols, data, simOperations, budgetLignes, offreNouvelleLgt, ventesSimulees, includeIdentifiees, financeSeuils, customPivotViews, estBase, dateCreation}){
+// V8 §1.3 — planVenteLignes remplace ventesSimulees (qui n'avait aucune dimension année :
+// {id, resCode, typeVente, logementsRestants, prixVente, origine}). Migration ascendante appliquée à
+// CHAQUE point d'entrée où une sauvegarde ancien format peut être relue — import JSON, restauration,
+// version « base » — comme migrateBudgetLignes, pour que la sauvegarde suivante écrive déjà le
+// nouveau format et non seulement l'affichage courant.
+function migratePlanVente(rec){
+  if (rec && Array.isArray(rec.planVenteLignes)) return rec.planVenteLignes;
+  return ((rec && rec.ventesSimulees) || []).map((v)=>({
+    id: v.id, resCode: v.resCode, origine: v.origine || 'ajout', retenue: true,
+    typeVente: v.typeVente ?? null, conventionne: null,
+    logementsTotal: null,
+    // Aucune année n'existait dans l'ancien modèle : on ne l'invente pas. La ligne reste sans
+    // échéancier et se signalera « année à renseigner » dans la table du plan de vente.
+    parAnnee: {},
+    prioriteManuelle: null, scorePotentiel: null, commentaire: null,
+    _legacyPrixVente: v.prixVente ?? null,
+    _legacyLogementsRestants: v.logementsRestants ?? null,
+  }));
+}
+// Écriture descendante : reconstruit l'ancien tableau ventesSimulees à partir du nouveau modèle, pour
+// qu'une sauvegarde produite par la V8 reste relisible par une version antérieure de l'outil (le champ
+// est toujours sérialisé par buildSaveRecord). L'échéancier annuel n'a pas d'équivalent dans l'ancien
+// format : seules les valeurs de stock y sont reportées, la perte est assumée et unidirectionnelle.
+function planVenteToLegacyVentes(lignes){
+  return (lignes||[]).map((l)=>({
+    id: l.id, resCode: l.resCode, typeVente: l.typeVente ?? null,
+    logementsRestants: l._legacyLogementsRestants ?? null,
+    prixVente: l._legacyPrixVente ?? null,
+    origine: l.origine || 'ajout',
+  }));
+}
+function buildSaveRecord({id, nom, nomFichierSource, gabaritComplet, nbCols, data, simOperations, budgetLignes, offreNouvelleLgt, ventesSimulees, planVenteLignes, objectifsVente, ventesRealisees, criteresVenteConfig, includeIdentifiees, financeSeuils, customPivotViews, estBase, dateCreation}){
   const now = new Date().toISOString();
   return {
     id: id || genSaveId(),
@@ -1050,10 +1234,18 @@ function buildSaveRecord({id, nom, nomFichierSource, gabaritComplet, nbCols, dat
     simOperations,
     budgetLignes: budgetLignes || [],
     offreNouvelleLgt: offreNouvelleLgt || {},
+    // V8 §1.3 — ventesSimulees reste ÉCRIT (et non seulement lu) tant que des sauvegardes antérieures
+    // à la V8 circulent : une sauvegarde relue par une version plus ancienne de l'outil y retrouve son
+    // format. Les nouveaux champs sont ajoutés APRÈS les existants, sans toucher à l'ordre de
+    // sérialisation en place (leçon des phases précédentes).
     ventesSimulees: ventesSimulees || [],
     includeIdentifiees,
     financeSeuils: financeSeuils || {},
     customPivotViews: customPivotViews || [],
+    planVenteLignes: planVenteLignes || [],
+    objectifsVente: objectifsVente || {},
+    ventesRealisees: ventesRealisees || {},
+    criteresVenteConfig: criteresVenteConfig || null,
   };
 }
 function isValidSaveRecord(obj){
@@ -1281,6 +1473,10 @@ function ImportScreen({onLoaded, onRestore, onBaseChanged, currentUser, onLogout
         const record = buildSaveRecord({
           nom, nomFichierSource: obj.nomFichierSource, gabaritComplet: obj.gabaritComplet, nbCols: obj.nbCols,
           data: obj.data, simOperations: obj.simOperations, budgetLignes: migrateBudgetLignes(obj), offreNouvelleLgt: obj.offreNouvelleLgt||{}, ventesSimulees: obj.ventesSimulees||[],
+          // §V8 Phase 1.3 — un fichier JSON exporté avant la V8 ne porte que ventesSimulees : migré ici
+          // pour que la sauvegarde créée à partir de cet import soit déjà au nouveau format.
+          planVenteLignes: migratePlanVente(obj), objectifsVente: obj.objectifsVente||{},
+          ventesRealisees: obj.ventesRealisees||{}, criteresVenteConfig: obj.criteresVenteConfig||null,
           includeIdentifiees: obj.includeIdentifiees!==undefined? obj.includeIdentifiees : true,
           estBase: false,
         });
@@ -1305,11 +1501,18 @@ function ImportScreen({onLoaded, onRestore, onBaseChanged, currentUser, onLogout
       "    if (!cotation || cotation.residences.length===0){ self.postMessage({ok:false, reason:'noresidences'}); return; }",
       "    var gainsSheetName = findSheet(wb.SheetNames, /referentiel des gains dpe/);",
       "    var gainsGrid = gainsSheetName ? parseGainsDPE(sheetToMatrix(wb.Sheets[gainsSheetName])) : null;",
+      // V8 §1.1 — onglet optionnel : son absence laisse cessionsEcheancier à null et n'interrompt rien.
+      "    var cessionsSheetName = findSheet(wb.SheetNames, /cessions identifiees/);",
+      "    var cessions = cessionsSheetName ? parseCessionsIdentifiees(sheetToMatrix(wb.Sheets[cessionsSheetName])) : null;",
+      "    var cessionsMatch = matchCessionsToResidences(cessions, cotation.residences);",
       "    self.postMessage({ ok:true, result:{",
       "      nbOnglets: wb.SheetNames.length, nbCols: cotation.nbCols,",
       "      residences: cotation.residences, operations: cotation.operations,",
       "      gainsGrid: gainsGrid || {}, hasGainsGrid: !!gainsSheetName,",
-      "      duplicateCodes: cotation.duplicateCodes || []",
+      "      duplicateCodes: cotation.duplicateCodes || [],",
+      "      cessionsEcheancier: cessions, hasCessions: !!cessionsSheetName,",
+      "      cessionsParResCode: cessionsMatch.parResCode,",
+      "      cessionsOrphelines: cessionsMatch.orphelines.length",
       "    }});",
       "  } catch(err){ self.postMessage({ok:false, reason:'exception', message: (err && err.message) || String(err)}); }",
       "};",
@@ -1340,11 +1543,20 @@ function ImportScreen({onLoaded, onRestore, onBaseChanged, currentUser, onLogout
       if (!cotation || cotation.residences.length===0) return failWith('noresidences');
       const gainsSheetName = findSheet(wb.SheetNames, /referentiel des gains dpe/);
       const gainsGrid = gainsSheetName ? parseGainsDPE(sheetToMatrix(wb.Sheets[gainsSheetName])) : null;
+      // V8 §1.1 — doit rester rigoureusement identique au corps de buildWorkerSource() ci-dessus :
+      // ce repli thread principal sert quand les Web Workers sont indisponibles ou plantent, un écart
+      // entre les deux produirait des imports au contenu différent selon le navigateur.
+      const cessionsSheetName = findSheet(wb.SheetNames, /cessions identifiees/);
+      const cessions = cessionsSheetName ? parseCessionsIdentifiees(sheetToMatrix(wb.Sheets[cessionsSheetName])) : null;
+      const cessionsMatch = matchCessionsToResidences(cessions, cotation.residences);
       finishWithResult(file.name, {
         nbOnglets: wb.SheetNames.length, nbCols: cotation.nbCols,
         residences: cotation.residences, operations: cotation.operations,
         gainsGrid: gainsGrid || {}, hasGainsGrid: !!gainsSheetName,
         duplicateCodes: cotation.duplicateCodes || [],
+        cessionsEcheancier: cessions, hasCessions: !!cessionsSheetName,
+        cessionsParResCode: cessionsMatch.parResCode,
+        cessionsOrphelines: cessionsMatch.orphelines.length,
       });
     } catch (err){ failWith('exception', err.message); }
   }
@@ -4216,16 +4428,27 @@ function ViewOffreNouvelle({residences, operations, offreNouvelleLgt, setOffreNo
   );
 }
 
-function ViewVente({residences, ventesSimulees, setVentesSimulees}){
+// §V8 Phase 1 — la vue consomme désormais planVenteLignes. Phase de socle : aucune interface nouvelle
+// ici, la carte « Ventes simulées » continue de n'afficher QUE les lignes ajoutées à la main
+// (origine 'ajout'). Les lignes issues de l'import vivent dans le modèle sans être affichées deux
+// fois — la carte du dessous les restitue déjà depuis `residences`. La table d'échéancier annuel et
+// le moteur de potentiel qui les exploiteront arrivent en Phases 2 et 3.
+function ViewVente({residences, planVenteLignes, setPlanVenteLignes}){
   const resByCode = useMemo(()=>{ const m={}; residences.forEach((r)=>m[r.code]=r); return m; }, [residences]);
   const typeVenteSuggestions = useMemo(()=>uniqueSorted(residences.map((r)=>r.typeVente)), [residences]);
+  const lignesAjoutees = useMemo(()=>planVenteLignes.filter((l)=>l.origine==='ajout'), [planVenteLignes]);
 
   function addVente(){
     if (!residences.length) return;
-    setVentesSimulees([{ id:genLocalId('vente'), resCode:null, typeVente:null, logementsRestants:null, prixVente:null, origine:'ajout' }].concat(ventesSimulees));
+    setPlanVenteLignes([{
+      id: genLocalId('pv'), resCode:null, origine:'ajout', retenue:true,
+      typeVente:null, conventionne:null, logementsTotal:null, parAnnee:{},
+      prioriteManuelle:null, scorePotentiel:null, commentaire:null,
+      _legacyLogementsRestants:null, _legacyPrixVente:null,
+    }].concat(planVenteLignes));
   }
-  function updateVente(id, patch){ setVentesSimulees(ventesSimulees.map((v)=> v.id===id? Object.assign({},v,patch) : v)); }
-  function removeVente(id){ setVentesSimulees(ventesSimulees.filter((v)=>v.id!==id)); }
+  function updateVente(id, patch){ setPlanVenteLignes(planVenteLignes.map((v)=> v.id===id? Object.assign({},v,patch) : v)); }
+  function removeVente(id){ setPlanVenteLignes(planVenteLignes.filter((v)=>v.id!==id)); }
   function selectVenteResidence(id, rawResCode, currentLogementsRestants){
     // rawResCode vient de <select> (toujours une chaîne côté DOM) : on le résout vers le code natif
     // de la résidence (souvent numérique) pour rester cohérent avec filteredCodes.has(resCode) côté
@@ -4233,11 +4456,14 @@ function ViewVente({residences, ventesSimulees, setVentesSimulees}){
     const match = residences.find((r)=>String(r.code)===rawResCode);
     const resCode = match? match.code : rawResCode;
     const patch = { resCode };
+    // §V8 Phase 1.3 — logementsTotal accompagne désormais la sélection : c'est lui qui plafonnera la
+    // somme des nbLgt de l'échéancier en Phase 3.
+    if (match) patch.logementsTotal = match.nbLgt || null;
     // Pré-remplissage au moment de la sélection uniquement, jamais en repli permanent : une fois
     // modifié manuellement par l'utilisateur, la valeur ne doit plus être écrasée par ce pré-remplissage.
     if (currentLogementsRestants===null || currentLogementsRestants===undefined){
       const r = resByCode[resCode];
-      if (r && r.nbLgtRestantVente!==null && r.nbLgtRestantVente!==undefined) patch.logementsRestants = r.nbLgtRestantVente;
+      if (r && r.nbLgtRestantVente!==null && r.nbLgtRestantVente!==undefined) patch._legacyLogementsRestants = r.nbLgtRestantVente;
     }
     updateVente(id, patch);
   }
@@ -4246,7 +4472,7 @@ function ViewVente({residences, ventesSimulees, setVentesSimulees}){
     {key:'resCode', label:'Résidence', render:(v)=>{
       const inList = residences.some((r)=>r.code===v.resCode);
       return (
-        <select className="ce-select" value={v.resCode ?? ''} onChange={(e)=>selectVenteResidence(v.id, e.target.value, v.logementsRestants)}>
+        <select className="ce-select" value={v.resCode ?? ''} onChange={(e)=>selectVenteResidence(v.id, e.target.value, v._legacyLogementsRestants)}>
           <option value="" disabled>— À sélectionner —</option>
           {!inList && v.resCode && <option value={v.resCode}>{(resByCode[v.resCode]||{}).nom || v.resCode} (hors filtre)</option>}
           {residences.map((r)=><option key={r.code} value={r.code}>{r.nom||r.code}</option>)}
@@ -4259,12 +4485,12 @@ function ViewVente({residences, ventesSimulees, setVentesSimulees}){
       <input className="ce-input" style={{width:140}} list="ce-type-vente-suggestions" value={v.typeVente ?? ''} placeholder="— À sélectionner —"
         onChange={(e)=>updateVente(v.id,{typeVente:e.target.value})} />
     )},
-    {key:'logementsRestants', label:'Logements restants', render:(v)=><input className="ce-input" style={{width:90}} type="number" min="0" value={v.logementsRestants ?? ''} onChange={(e)=>updateVente(v.id,{logementsRestants: e.target.value===''? null: Number(e.target.value)})} />},
-    {key:'prixVente', label:'Prix de vente', render:(v)=><input className="ce-input" style={{width:110}} type="number" min="0" value={v.prixVente ?? ''} onChange={(e)=>updateVente(v.id,{prixVente: e.target.value===''? null: Number(e.target.value)})} />},
+    {key:'_legacyLogementsRestants', label:'Logements restants', render:(v)=><input className="ce-input" style={{width:90}} type="number" min="0" value={v._legacyLogementsRestants ?? ''} onChange={(e)=>updateVente(v.id,{_legacyLogementsRestants: e.target.value===''? null: Number(e.target.value)})} />},
+    {key:'_legacyPrixVente', label:'Prix de vente', render:(v)=><input className="ce-input" style={{width:110}} type="number" min="0" value={v._legacyPrixVente ?? ''} onChange={(e)=>updateVente(v.id,{_legacyPrixVente: e.target.value===''? null: Number(e.target.value)})} />},
     {key:'_montantM2', label:'Montant au m²', render:(v)=>{
       const r = resByCode[v.resCode];
-      if (!r || !r.shab || r.shab<=0 || v.prixVente===null || v.prixVente===undefined) return '—';
-      return fmtEur(v.prixVente / r.shab);
+      if (!r || !r.shab || r.shab<=0 || v._legacyPrixVente===null || v._legacyPrixVente===undefined) return '—';
+      return fmtEur(v._legacyPrixVente / r.shab);
     }},
     {key:'_actions', label:'', render:(v)=><button className="ce-btn-outline ce-btn-sm" onClick={()=>removeVente(v.id)}>Suppr.</button>},
   ];
@@ -4292,7 +4518,7 @@ function ViewVente({residences, ventesSimulees, setVentesSimulees}){
     <div style={{padding:24,display:'flex',flexDirection:'column',gap:20}}>
       <div className="ce-card">
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:10,marginBottom:12}}>
-          <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700}}>Ventes simulées ({ventesSimulees.length})</h2>
+          <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700}}>Ventes simulées ({lignesAjoutees.length})</h2>
           <button className="ce-btn ce-btn-sm" onClick={addVente} disabled={!residences.length} title={!residences.length? "Aucune résidence ne correspond aux filtres actifs" : ""}>+ Ajouter une vente</button>
         </div>
         <p style={{fontSize:'.72rem',color:'var(--ce-vert-fonce)',marginBottom:12,lineHeight:1.5}}>
@@ -4300,7 +4526,7 @@ function ViewVente({residences, ventesSimulees, setVentesSimulees}){
           en complément des résidences déjà en plan de vente listées ci-dessous.
         </p>
         <datalist id="ce-type-vente-suggestions">{typeVenteSuggestions.map((t)=><option key={t} value={t} />)}</datalist>
-        {ventesSimulees.length>0 ? <SortableTable columns={ventesSimuleesCols} rows={ventesSimulees} pageSize={20} /> : <div style={{fontSize:'.78rem',color:'#9fb3ae'}}>Aucune vente simulée pour l'instant.</div>}
+        {lignesAjoutees.length>0 ? <SortableTable columns={ventesSimuleesCols} rows={lignesAjoutees} pageSize={20} /> : <div style={{fontSize:'.78rem',color:'#9fb3ae'}}>Aucune vente simulée pour l'instant.</div>}
       </div>
 
       {hasVente ? (
@@ -5482,7 +5708,13 @@ function App({currentUser, onLogout}){
   // §Phase 7.2 — vues personnalisées du pivot ({id, nom, dataset, rowKey, colKey, metricKeys, heatmap}),
   // persistées avec la sauvegarde de l'import comme financeSeuils ci-dessus.
   const [customPivotViews, setCustomPivotViewsRaw] = useState([]);
-  const [ventesSimulees, setVentesSimuleesRaw] = useState([]);
+  // §V8 Phase 1 — plan de vente. planVenteLignes remplace l'ancien ventesSimulees comme SEULE source
+  // de vérité ; l'ancien format n'est plus un état, il est reconstruit à l'écriture par
+  // planVenteToLegacyVentes() pour rester relisible par une version antérieure de l'outil.
+  const [planVenteLignes, setPlanVenteLignesRaw] = useState([]);
+  const [objectifsVente, setObjectifsVenteRaw] = useState({});   // { 2026: {logements, produit} }
+  const [ventesRealisees, setVentesRealiseesRaw] = useState({}); // idem, années ≤ coupure Actuel
+  const [criteresVenteConfig, setCriteresVenteConfigRaw] = useState(null); // null = défaut Cellance
   const [includeIdentifiees, setIncludeIdentifiees] = useState(true);
   const [dirty, setDirty] = useState(false);
   const [filters, setFilters] = useState({commune:'',secteur:'',famille:'',dpe:'',qpv:''});
@@ -5504,7 +5736,9 @@ function App({currentUser, onLogout}){
       try {
         const all = await idbGetAll();
         const baseRaw = all.find((r)=>r.estBase) || null;
-        const base = baseRaw? Object.assign({}, baseRaw, {budgetLignes: migrateBudgetLignes(baseRaw)}) : null;
+        // §V8 §10.5 — les migrations s'appliquent aussi à la version « base », pas seulement à l'import
+        // courant : une base antérieure à la V8 serait sinon comparée sur un champ inexistant.
+        const base = baseRaw? Object.assign({}, baseRaw, {budgetLignes: migrateBudgetLignes(baseRaw), planVenteLignes: migratePlanVente(baseRaw)}) : null;
         if (!cancelled){ setBaseImport(base); setSavesCount(all.length); }
       } catch(e){ /* déjà géré globalement : apiFetch déclenche onUnauthorized/l'écran de connexion sur 401 */ }
     })();
@@ -5526,7 +5760,13 @@ function App({currentUser, onLogout}){
     setSimOperationsRaw(d.operations.map((o)=>Object.assign({},o)));
     setBudgetLignesRaw([]);
     setOffreNouvelleLgtRaw({});
-    setVentesSimuleesRaw([]);
+    // §V8 Phase 1 — le plan de vente n'est pas vide à l'import : il est alimenté par les colonnes
+    // vente de la Base de cotation et, quand l'onglet existe, par l'échéancier de « 5. Cessions
+    // identifiées ». Les objectifs et le réalisé, eux, n'ont aucune source dans les fichiers.
+    setPlanVenteLignesRaw(buildPlanVenteInitial(d.residences, d.cessionsParResCode));
+    setObjectifsVenteRaw({});
+    setVentesRealiseesRaw({});
+    setCriteresVenteConfigRaw(null);
     setFinanceSeuilsRaw({});
     setCustomPivotViewsRaw([]);
     setDirty(false);
@@ -5538,10 +5778,19 @@ function App({currentUser, onLogout}){
     // moins de résidences que réellement présentes dans le fichier.
     setFilters({commune:'',secteur:'',famille:'',dpe:'',qpv:''});
     setBaseRefreshTick((t)=>t+1); // rafraîchit la version base (elle a pu changer depuis un autre onglet/écran)
+    const avertissements = [];
     if (d.duplicateCodes && d.duplicateCodes.length){
       const n = d.duplicateCodes.length;
-      setSaveToast(`Attention : ${n} code${n>1?'s':''} de résidence en doublon dans le fichier importé (${d.duplicateCodes.slice(0,5).join(', ')}${n>5?'…':''}) — seule la première occurrence de chaque code a été conservée.`);
-      setTimeout(()=>setSaveToast(null), 8000);
+      avertissements.push(`${n} code${n>1?'s':''} de résidence en doublon dans le fichier importé (${d.duplicateCodes.slice(0,5).join(', ')}${n>5?'…':''}) — seule la première occurrence de chaque code a été conservée.`);
+    }
+    // §V8 Phase 1.2 — les lignes de cessions non rattachées ne sont jamais silencieusement ignorées.
+    if (d.cessionsOrphelines){
+      const n = d.cessionsOrphelines;
+      avertissements.push(`${n} ligne${n>1?'s':''} de « 5. Cessions identifiées » n'${n>1?'ont':'a'} pas pu être rattachée${n>1?'s':''} à une résidence (ni par code, ni par nom) — leur échéancier n'est pas repris au plan de vente.`);
+    }
+    if (avertissements.length){
+      setSaveToast('Attention : ' + avertissements.join(' '));
+      setTimeout(()=>setSaveToast(null), 12000);
     }
   }
   function onRestoreSave(rec){
@@ -5549,7 +5798,12 @@ function App({currentUser, onLogout}){
     setSimOperationsRaw((rec.simOperations||[]).map((o)=>Object.assign({},o)));
     setBudgetLignesRaw(migrateBudgetLignes(rec));
     setOffreNouvelleLgtRaw(rec.offreNouvelleLgt || {});
-    setVentesSimuleesRaw(rec.ventesSimulees || []);
+    // §V8 Phase 1.3 — migration à la LECTURE : une sauvegarde antérieure à la V8 ne porte que
+    // ventesSimulees, sans aucune dimension année.
+    setPlanVenteLignesRaw(migratePlanVente(rec));
+    setObjectifsVenteRaw(rec.objectifsVente || {});
+    setVentesRealiseesRaw(rec.ventesRealisees || {});
+    setCriteresVenteConfigRaw(rec.criteresVenteConfig || null);
     setFinanceSeuilsRaw(rec.financeSeuils || {});
     setCustomPivotViewsRaw(rec.customPivotViews || []);
     setIncludeIdentifiees(rec.includeIdentifiees!==undefined? rec.includeIdentifiees : true);
@@ -5570,10 +5824,15 @@ function App({currentUser, onLogout}){
   function setOperations(next){ setSimOperationsRaw(next); setDirty(true); }
   function setBudgetLignes(next){ setBudgetLignesRaw(next); setDirty(true); }
   function setOffreNouvelleLgt(next){ setOffreNouvelleLgtRaw(next); setDirty(true); }
-  function setVentesSimulees(next){ setVentesSimuleesRaw(next); setDirty(true); }
+  function setPlanVenteLignes(next){ setPlanVenteLignesRaw(next); setDirty(true); }
+  function setObjectifsVente(next){ setObjectifsVenteRaw(next); setDirty(true); }
+  function setVentesRealisees(next){ setVentesRealiseesRaw(next); setDirty(true); }
+  function setCriteresVenteConfig(next){ setCriteresVenteConfigRaw(next); setDirty(true); }
   function setFinanceSeuils(next){ setFinanceSeuilsRaw(next); setDirty(true); }
   function setCustomPivotViews(next){ setCustomPivotViewsRaw(next); setDirty(true); }
-  function resetSimulation(){ setSimOperationsRaw(data.operations.map((o)=>Object.assign({},o))); setBudgetLignesRaw([]); setOffreNouvelleLgtRaw({}); setVentesSimuleesRaw([]); setFinanceSeuilsRaw({}); setCustomPivotViewsRaw([]); setIncludeIdentifiees(true); setDirty(false); }
+  // Réinitialiser, c'est revenir au contenu du FICHIER, pas au vide : le plan de vente est donc
+  // reconstruit depuis l'import (colonnes vente + échéancier de cessions), comme à l'ouverture.
+  function resetSimulation(){ setSimOperationsRaw(data.operations.map((o)=>Object.assign({},o))); setBudgetLignesRaw([]); setOffreNouvelleLgtRaw({}); setPlanVenteLignesRaw(buildPlanVenteInitial(data.residences, data.cessionsParResCode)); setObjectifsVenteRaw({}); setVentesRealiseesRaw({}); setCriteresVenteConfigRaw(null); setFinanceSeuilsRaw({}); setCustomPivotViewsRaw([]); setIncludeIdentifiees(true); setDirty(false); }
 
   async function doSaveCurrent(name, asNew){
     // idbGet (comme idbPut) rejette désormais si la session a expiré (12h) : englobé dans le même
@@ -5587,7 +5846,10 @@ function App({currentUser, onLogout}){
         nomFichierSource: data.fileName,
         gabaritComplet: data.gabaritComplet,
         nbCols: data.nbCols,
-        data, simOperations, budgetLignes, offreNouvelleLgt, ventesSimulees, includeIdentifiees, financeSeuils, customPivotViews,
+        data, simOperations, budgetLignes, offreNouvelleLgt,
+        ventesSimulees: planVenteToLegacyVentes(planVenteLignes),
+        planVenteLignes, objectifsVente, ventesRealisees, criteresVenteConfig,
+        includeIdentifiees, financeSeuils, customPivotViews,
         estBase: existing? existing.estBase : false,
         dateCreation: existing? existing.dateCreation : undefined,
       });
@@ -5731,10 +5993,10 @@ function App({currentUser, onLogout}){
         {activeTab==='vente' && (
           <ViewVente
             residences={filteredResidences}
-            ventesSimulees={ventesSimulees.filter((v)=>v.resCode===null || filteredCodes.has(v.resCode))}
-            setVentesSimulees={(next)=>{
-              const otherCodesVentes = ventesSimulees.filter((v)=>v.resCode!==null && !filteredCodes.has(v.resCode));
-              setVentesSimulees(otherCodesVentes.concat(next));
+            planVenteLignes={planVenteLignes.filter((v)=>v.resCode===null || filteredCodes.has(v.resCode))}
+            setPlanVenteLignes={(next)=>{
+              const horsFiltre = planVenteLignes.filter((v)=>v.resCode!==null && !filteredCodes.has(v.resCode));
+              setPlanVenteLignes(horsFiltre.concat(next));
             }}
           />
         )}

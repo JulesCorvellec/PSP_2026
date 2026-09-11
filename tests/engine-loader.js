@@ -14,6 +14,7 @@ const ENGINE_NAMES = [
   'ceStripAccents', 'ceNorm', 'ceNum',
   'sheetToMatrix', 'findHeaderRow', 'findColIndex', 'findAllColIndices', 'findSheet',
   'parseBaseCotation', 'parseGainsDPE', 'findClassCols',
+  'CESSION_FAMILLES', 'parseCessionsIdentifiees', 'matchCessionsToResidences', 'buildPlanVenteInitial',
   'CLASS_ORDER', 'classIndex', 'findGridKey', 'resolveGain', 'hasKnownDpeGain',
   'computeTrajectory', 'computeTrajectoryByResidence',
   'familyOfType', 'TECH_SUBCRITERES', 'TECH_RC_MAP', 'TECH_REHA_MAP', 'computeTechniqueProjection',
