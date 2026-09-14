@@ -7011,6 +7011,13 @@ function ResidenceDrawer({residence, operations, residences, onClose, gainsGrid,
    bandeau de conformité tant que le Checkpoint 1 n'est pas validé — les blocs de diagnostic, la
    matrice de ciblage et le plan d'adaptation arrivent aux phases 2 à 5. */
 const ACCESS_BANDE_COULEURS = { bonne:'#009261', moyenne:'#58D88B', faible:'#FF8364' };
+// Titres du panneau ouvert au clic sur un KPI — repris des libellés des cartes, pour qu'on retrouve
+// sans hésiter de quelle sélection vient la liste.
+const KPI_ACCESS_TITRES = {
+  faible: 'Parc à accessibilité faible',
+  vieilFort: 'Parc en vieillissement fort',
+  cible: 'Cible prioritaire — accessibilité faible et vieillissement fort',
+};
 /* Lecture stratégique de la matrice (§3.2) : c'est le libellé d'orientation qui transforme un
    croisement en outil de décision. Les quatre coins sont ceux de la spécification ; les cinq cases
    intermédiaires en découlent par continuité. Ce sont des ORIENTATIONS PROPOSÉES, pas des verdicts —
@@ -7971,6 +7978,29 @@ function ViewAccessibilite({residences, operations, includeIdentifiees, planVent
           sub={sansVieillissement? 'Nécessite le vieillissement' : 'Accessibilité faible et vieillissement fort'}
           onClick={sansVieillissement? null : ()=>toggleKpi('cible')} active={kpiFiltre==='cible'} />
       </div>
+
+      {/* Le clic sur un KPI filtrait déjà la table du bas, mais celle-ci est loin sous les graphiques :
+          la liste s'ouvre donc aussi ici, immédiatement sous les cartes, comme les panneaux de KPI de
+          la Vue d'ensemble. Les deux restent cohérents — c'est la même sélection, annoncée des deux
+          côtés — et se referment ensemble. */}
+      {kpiFiltre && (
+        <ResidenceListPanel
+          title={KPI_ACCESS_TITRES[kpiFiltre]+' — '+lignesTable.length+' résidence'+(lignesTable.length>1?'s':'')+' · '+fmtNum(nbLgt(lignesTable))+' logements'}
+          rows={lignesTable} maxHeight={280} marginTop={0}
+          onClose={()=>setKpiFiltre(null)}
+          renderRow={(l)=>(
+            <div onClick={()=>onSelectResidence && onSelectResidence(l.r)}
+              style={{display:'flex',justifyContent:'space-between',gap:8,fontSize:'.76rem',color:'var(--ce-vert-fonce)',padding:'3px 0',borderBottom:'1px solid #f0f5f3',cursor:onSelectResidence?'pointer':'default'}}>
+              <span>{l.r.nom || l.r.code}{l.r.commune? <span style={{color:'#9fb3ae'}}> · {l.r.commune}</span> : null}</span>
+              <span style={{color:'#9fb3ae',flexShrink:0}}>
+                {l.score!==null? 'score '+fmtDec(l.score,0) : 'non cotée'}
+                {l.tranche? ' · '+l.tranche.court.replace('Vieillissement ','vieill. ') : ''}
+                {' · '+fmtNum(l.r.nbLgt)+' lgt'}
+              </span>
+            </div>
+          )}
+        />
+      )}
 
       {/* ------- Répartition par palier + contribution des critères ------- */}
       <div style={{display:'flex',gap:20,flexWrap:'wrap'}}>
