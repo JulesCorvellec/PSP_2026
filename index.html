@@ -6539,32 +6539,129 @@ function ResidenceDrawer({residence, operations, residences, onClose, gainsGrid,
    vieillissement, navigation et états persistés. La vue elle-même est délibérément réduite à son
    bandeau de conformité tant que le Checkpoint 1 n'est pas validé — les blocs de diagnostic, la
    matrice de ciblage et le plan d'adaptation arrivent aux phases 2 à 5. */
-function ViewAccessibilite({residences, accessibiliteConfig, echelles}){
+const ACCESS_BANDE_COULEURS = { bonne:'#009261', moyenne:'#58D88B', faible:'#FF8364' };
+// Bornes de périodes de construction : la coupure 2005 est la seule qui ne soit pas conventionnelle —
+// c'est celle de la loi 2005-102, dont on cherche précisément à objectiver l'effet sur l'accessibilité.
+const ACCESS_PERIODES = [
+  { label:'Avant 1960',    min:-Infinity, max:1960 },
+  { label:'1960 - 1979',   min:1960,      max:1980 },
+  { label:'1980 - 1999',   min:1980,      max:2000 },
+  { label:'2000 - 2004',   min:2000,      max:2005 },
+  { label:'2005 et après', min:2005,      max:Infinity },
+];
+function ViewAccessibilite({residences, accessibiliteConfig, setAccessibiliteConfig, echelles, onSelectResidence}){
   const poids = (accessibiliteConfig && accessibiliteConfig.poids) || ACCESSIBILITE_POIDS_DEFAUT;
-  const scores = residences.map((r)=>scoreAccessibilite(r, poids));
-  const cotees = scores.filter((s)=>s.score!==null).length;
-  const partiels = scores.filter((s)=>s.score!==null && s.couverture<0.5).length;
+  const bandes = (accessibiliteConfig && accessibiliteConfig.bandes) || ACCESS_BANDS_DEFAUT;
+  const [unite, setUnite] = useState('logements');   // 'logements' | 'residences'
+  const [kpiFiltre, setKpiFiltre] = useState(null);  // null | 'faible' | 'vieilFort' | 'cible'
+  const [showParams, setShowParams] = useState(false);
+
+  const lignes = useMemo(()=>residences.map((r)=>{
+    const s = scoreAccessibilite(r, poids);
+    return { r, score:s.score, couverture:s.couverture, manquants:s.manquants,
+      bande: bandeAccessibilite(s.score, bandes), tranche: trancheVieillissement(r.vieillissement) };
+  }), [residences, poids, bandes]);
+
   const criteresPresents = CRITERES_ACCESSIBILITE.filter((c)=>residences.some((r)=>r[c.cle]!==null && r[c.cle]!==undefined));
-  const sansVieillissement = residences.every((r)=>r.vieillissement===null || r.vieillissement===undefined);
-  // §9.3 — une échelle de cotation autre que 0-100 a été ramenée à 100 à la lecture : on ne le fait
-  // jamais en silence, un score calculé sur une échelle redressée doit être identifiable comme tel.
+  const sansVieillissement = lignes.every((l)=>l.tranche===null);
   const echellesRedressees = Object.keys(echelles||{}).filter((k)=>(echelles[k]||{}).facteur!==1);
+  const nbLgt = (arr)=>arr.reduce((s,l)=>s+(l.r.nbLgt||0), 0);
+
+  const cotees = lignes.filter((l)=>l.score!==null);
+  const partiels = cotees.filter((l)=>l.couverture<0.5);
+  const faibles = cotees.filter((l)=>l.bande && l.bande.cle==='faible');
+  const vieilFort = lignes.filter((l)=>l.tranche && l.tranche.cle==='fort');
+  const cible = cotees.filter((l)=>l.bande && l.bande.cle==='faible' && l.tranche && l.tranche.cle==='fort');
+
+  // Les KPI filtrent la table du bas (§2.1) : un second clic sur le même KPI relâche le filtre, comme
+  // les panneaux de la Vue d'ensemble.
+  const lignesTable = kpiFiltre==='faible'? faibles : kpiFiltre==='vieilFort'? vieilFort : kpiFiltre==='cible'? cible : lignes;
+  function toggleKpi(cle){ setKpiFiltre((cur)=> cur===cle? null : cle); }
+
+  // Moyenne par critère + taux de remplissage : c'est ce croisement qui dit POURQUOI le parc est mal
+  // coté (ascenseurs ? circulations ? desserte ?), là où le score global ne dit que « mal coté ».
+  const contributions = criteresPresents.map((c)=>{
+    const vals = residences.map((r)=>r[c.cle]).filter((v)=>v!==null && v!==undefined && !isNaN(v));
+    return { cle:c.cle, label:c.label, poids:poids[c.cle]||0,
+      moyenne: vals.length? vals.reduce((a,b)=>a+b,0)/vals.length : null,
+      remplissage: residences.length? vals.length/residences.length : 0 };
+  }).sort((a,b)=>(a.moyenne===null?999:a.moyenne)-(b.moyenne===null?999:b.moyenne));
+
+  function moyenneParModalite(cleModalite, limite){
+    const agg = {};
+    cotees.forEach((l)=>{
+      const k = l.r[cleModalite];
+      if (k===null || k===undefined || String(k).trim()==='') return;
+      const key = String(k).trim();
+      if (!agg[key]) agg[key] = { somme:0, n:0, lgt:0 };
+      agg[key].somme += l.score; agg[key].n++; agg[key].lgt += (l.r.nbLgt||0);
+    });
+    return Object.keys(agg).map((k)=>({ label:k, moyenne:agg[k].somme/agg[k].n, n:agg[k].n, lgt:agg[k].lgt }))
+      .sort((a,b)=> (unite==='logements'? b.lgt-a.lgt : b.n-a.n)).slice(0, limite||10);
+  }
+  const parCommune = moyenneParModalite('commune', 10);
+  const parSecteur = moyenneParModalite('secteur', 10);
+  const parPeriode = ACCESS_PERIODES.map((p)=>{
+    const dedans = cotees.filter((l)=>{ const a=l.r.anneeConstruction; return a!==null && a!==undefined && a>=p.min && a<p.max; });
+    return { label:p.label, moyenne: dedans.length? dedans.reduce((s,l)=>s+l.score,0)/dedans.length : null, n:dedans.length };
+  }).filter((p)=>p.n>0);
+
+  function majPoids(cle, valeur){
+    const next = Object.assign({}, poids); next[cle] = Math.max(0, Number(valeur)||0);
+    setAccessibiliteConfig(Object.assign({}, accessibiliteConfig||{}, { poids: next }));
+  }
+  function majBande(cle, min){
+    const next = bandes.map((b)=> b.cle===cle? Object.assign({}, b, { min: Math.max(0, Math.min(100, Number(min)||0)) }) : b);
+    setAccessibiliteConfig(Object.assign({}, accessibiliteConfig||{}, { bandes: next }));
+  }
+  const estDefaut = !accessibiliteConfig || (!accessibiliteConfig.poids && !accessibiliteConfig.bandes);
+
+  const colonnes = [
+    { key:'code', label:'Code' },
+    { key:'nom', label:'Résidence' },
+    { key:'commune', label:'Commune' },
+    { key:'nbLgt', label:'Lgts', render:(x)=>fmtNum(x.nbLgt) },
+    { key:'typeBati', label:'Typologie' },
+    { key:'score', label:'Score', render:(x)=>{
+        if (x.score===null) return <span style={{color:'#9fb3ae'}}>—</span>;
+        const b = bandeAccessibilite(x.score, bandes);
+        return <span style={{fontWeight:700,color:ACCESS_BANDE_COULEURS[b.cle]}}>{fmtDec(x.score,0)}</span>;
+      } },
+    ...criteresPresents.map((c)=>({ key:c.cle, label:c.label, render:(x)=> x.r[c.cle]===null||x.r[c.cle]===undefined? '—' : fmtDec(x.r[c.cle],0) })),
+    { key:'vieillissement', label:'Vieillissement', render:(x)=> x.tranche? x.tranche.court.replace('Vieillissement ','') : '—' },
+    { key:'couverture', label:'Couverture', render:(x)=>{
+        if (x.score===null) return '—';
+        const pct = Math.round(x.couverture*100);
+        const partiel = x.couverture<0.5;
+        return <span title={partiel? 'Score partiel — critères manquants : '+x.manquants.map(libelleChampAccessibilite).join(', ') : ''}
+          style={{color: partiel? 'var(--ce-corail)':'inherit', fontWeight: partiel?700:400}}>{pct}%{partiel?' ⚠':''}</span>;
+      } },
+  ];
+  const rows = lignesTable.map((l)=>Object.assign({}, l, { code:l.r.code, nom:l.r.nom, commune:l.r.commune, nbLgt:l.r.nbLgt, typeBati:l.r.typeBati }));
 
   return (
     <div style={{padding:24,display:'flex',flexDirection:'column',gap:20}}>
+      {/* ------- Conformité du fichier ------- */}
       <div className="ce-card">
-        <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700,marginBottom:10}}>Accessibilité & adaptabilité — socle de lecture</h2>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:10,marginBottom:10}}>
+          <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700}}>Accessibilité & adaptabilité — diagnostic du parc</h2>
+          <div style={{display:'flex',gap:6,alignItems:'center'}}>
+            <button className={unite==='logements'?'ce-btn ce-btn-sm':'ce-btn-outline ce-btn-sm'} onClick={()=>setUnite('logements')}>Logements</button>
+            <button className={unite==='residences'?'ce-btn ce-btn-sm':'ce-btn-outline ce-btn-sm'} onClick={()=>setUnite('residences')}>Résidences</button>
+            <button className="ce-btn-outline ce-btn-sm" onClick={()=>setShowParams((v)=>!v)}>{showParams?'Masquer':'Pondérations & bornes'}</button>
+          </div>
+        </div>
         <p style={{fontSize:'.78rem',color:'var(--ce-vert-fonce)',lineHeight:1.6}}>
-          {fmtNum(cotees)} résidence{cotees>1?'s':''} sur {fmtNum(residences.length)} disposent d'un score
-          d'accessibilité, calculé sur {criteresPresents.length} sous-critère{criteresPresents.length>1?'s':''} de
-          cotation présent{criteresPresents.length>1?'s':''} dans ce fichier :{' '}
+          {fmtNum(cotees.length)} résidence{cotees.length>1?'s':''} sur {fmtNum(residences.length)} disposent d'un score,
+          calculé sur {criteresPresents.length} sous-critère{criteresPresents.length>1?'s':''} de cotation présent{criteresPresents.length>1?'s':''} dans ce fichier :{' '}
           {criteresPresents.map((c)=>c.label).join(' · ')}.
-          {partiels>0 && <span> {fmtNum(partiels)} résidence{partiels>1?'s':''} en score partiel (moins de la moitié du poids des critères couverte).</span>}
+          {partiels.length>0 && <span> {fmtNum(partiels.length)} en score partiel (moins de la moitié du poids des critères couverte).</span>}
         </p>
         <p style={{fontSize:'.7rem',color:'var(--ce-vert-fonce)',marginTop:10,lineHeight:1.5}}>
-          Un critère absent est retiré du dénominateur du score, jamais compté zéro : une résidence mal
-          renseignée ne se retrouve pas artificiellement en bas de classement. La granularité disponible
-          est la résidence — le fichier ne porte aucun décompte de logements réellement adaptés.
+          Un critère absent est retiré du dénominateur, jamais compté zéro : une résidence mal renseignée
+          ne se retrouve pas artificiellement en bas de classement. <b>La granularité disponible est la
+          résidence</b> — le fichier ne porte aucun décompte de logements réellement accessibles ou déjà
+          adaptés, et la page ne parle donc jamais que de « logements des résidences ciblées ».
         </p>
         {echellesRedressees.length>0 && (
           <p style={{fontSize:'.7rem',color:'var(--ce-vert-fonce)',marginTop:8,lineHeight:1.5}}>
@@ -6572,12 +6669,158 @@ function ViewAccessibilite({residences, accessibiliteConfig, echelles}){
           </p>
         )}
         {sansVieillissement && (
-          <div className="ce-card" style={{background:'var(--ce-saumon)',marginTop:12}}>
+          <div className="ce-card" style={{background:'var(--ce-saumon)',marginTop:12,fontSize:'.76rem',lineHeight:1.5}}>
             La colonne « Vieillissement » est absente de ce fichier : la matrice de ciblage
-            Accessibilité × Vieillissement et le bonus de priorité correspondant ne seront pas
-            disponibles. Le diagnostic d'accessibilité et le plan d'adaptation, eux, restent calculables.
+            Accessibilité × Vieillissement et le bonus de priorité correspondant ne sont pas disponibles.
+            Le diagnostic d'accessibilité et le plan d'adaptation, eux, restent calculables.
           </div>
         )}
+        {showParams && (
+          <div style={{marginTop:14,paddingTop:14,borderTop:'1px solid #eef4f2'}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
+              <h3 style={{fontSize:'.8rem',fontWeight:700,color:'var(--ce-vert-tres-fonce)'}}>Pondérations des critères et bornes des paliers</h3>
+              <button className="ce-btn-outline ce-btn-sm" disabled={estDefaut} onClick={()=>setAccessibiliteConfig(null)}>Réinitialiser aux valeurs par défaut</button>
+            </div>
+            <div style={{display:'flex',flexWrap:'wrap',gap:12}}>
+              {CRITERES_ACCESSIBILITE.map((c)=>{
+                const absent = !criteresPresents.some((p)=>p.cle===c.cle);
+                return (
+                  <div key={c.cle} style={{display:'flex',flexDirection:'column',gap:4,minWidth:190,opacity:absent?.45:1}}>
+                    <label style={{fontSize:'.66rem',fontWeight:700,color:'var(--ce-vert-fonce)'}} title={absent? 'Critère absent de ce fichier : sans effet sur le score' : ''}>
+                      {c.label}{absent? ' (absent)':''}
+                    </label>
+                    <input className="ce-select" type="number" min="0" step="1" value={poids[c.cle]??0} onChange={(e)=>majPoids(c.cle, e.target.value)} />
+                  </div>
+                );
+              })}
+            </div>
+            <div style={{display:'flex',flexWrap:'wrap',gap:12,marginTop:12}}>
+              {bandes.filter((b)=>b.cle!=='faible').map((b)=>(
+                <div key={b.cle} style={{display:'flex',flexDirection:'column',gap:4,minWidth:190}}>
+                  <label style={{fontSize:'.66rem',fontWeight:700,color:'var(--ce-vert-fonce)'}}>{b.label} — à partir de</label>
+                  <input className="ce-select" type="number" min="0" max="100" step="1" value={b.min} onChange={(e)=>majBande(b.cle, e.target.value)} />
+                </div>
+              ))}
+            </div>
+            <p style={{fontSize:'.7rem',color:'var(--ce-vert-fonce)',marginTop:10,lineHeight:1.5}}>
+              Les paliers sont des <b>seuils absolus</b> sur l'échelle 0-100 des cotations, pas un
+              pourcentage du meilleur score observé : un parc entièrement médiocre reste entièrement
+              classé en accessibilité faible, il ne se répartit pas mécaniquement sur les trois paliers.
+            </p>
+          </div>
+        )}
+      </div>
+
+      {/* ------- KPI ------- */}
+      <div style={{display:'flex',gap:16,flexWrap:'wrap'}}>
+        <KpiCard label="Résidences cotées" value={fmtNum(cotees.length)}
+          sub={residences.length? Math.round(cotees.length/residences.length*100)+'% du parc filtré' : null} />
+        <KpiCard label="Parc à accessibilité faible"
+          value={unite==='logements'? fmtNum(nbLgt(faibles)) : fmtNum(faibles.length)}
+          sub={unite==='logements'? fmtNum(faibles.length)+' résidences' : fmtNum(nbLgt(faibles))+' logements'}
+          onClick={()=>toggleKpi('faible')} active={kpiFiltre==='faible'} />
+        <KpiCard label="Parc en vieillissement fort"
+          value={sansVieillissement? '—' : (unite==='logements'? fmtNum(nbLgt(vieilFort)) : fmtNum(vieilFort.length))}
+          sub={sansVieillissement? 'Colonne absente du fichier' : (unite==='logements'? fmtNum(vieilFort.length)+' résidences' : fmtNum(nbLgt(vieilFort))+' logements')}
+          onClick={sansVieillissement? null : ()=>toggleKpi('vieilFort')} active={kpiFiltre==='vieilFort'} />
+        <KpiCard label="Cible prioritaire"
+          value={sansVieillissement? '—' : (unite==='logements'? fmtNum(nbLgt(cible)) : fmtNum(cible.length))}
+          sub={sansVieillissement? 'Nécessite le vieillissement' : 'Accessibilité faible et vieillissement fort'}
+          onClick={sansVieillissement? null : ()=>toggleKpi('cible')} active={kpiFiltre==='cible'} />
+      </div>
+
+      {/* ------- Répartition par palier + contribution des critères ------- */}
+      <div style={{display:'flex',gap:20,flexWrap:'wrap'}}>
+        <div className="ce-card" style={{flex:1,minWidth:320}}>
+          <h3 style={{fontSize:'.85rem',fontWeight:700,color:'var(--ce-vert-tres-fonce)',marginBottom:12}}>
+            Répartition du parc par palier d'accessibilité
+          </h3>
+          {(()=>{
+            const ordre = ['bonne','moyenne','faible'];
+            const parBande = ordre.map((cle)=>{
+              const b = bandes.find((x)=>x.cle===cle) || ACCESS_BANDS_DEFAUT.find((x)=>x.cle===cle);
+              const l = cotees.filter((x)=>x.bande && x.bande.cle===cle);
+              return { cle, label:b.label, valeur: unite==='logements'? nbLgt(l) : l.length };
+            });
+            return (
+              <ChartCanvas type="doughnut" height={260} data={{
+                labels: parBande.map((b)=>b.label),
+                datasets: [{ data: parBande.map((b)=>b.valeur), backgroundColor: parBande.map((b)=>ACCESS_BANDE_COULEURS[b.cle]) }]
+              }} options={{ plugins:{ tooltip:{ callbacks:{ label:(ctx)=> ctx.label+' : '+fmtNum(ctx.raw)+' '+(unite==='logements'?'logements':'résidences') } } } }} />
+            );
+          })()}
+        </div>
+        <div className="ce-card" style={{flex:1.4,minWidth:380}}>
+          <h3 style={{fontSize:'.85rem',fontWeight:700,color:'var(--ce-vert-tres-fonce)',marginBottom:4}}>
+            Note moyenne du parc, critère par critère
+          </h3>
+          <p style={{fontSize:'.7rem',color:'var(--ce-vert-fonce)',marginBottom:12}}>
+            C'est ce graphique qui dit <b>pourquoi</b> le parc est mal coté — ascenseurs, circulations,
+            desserte — là où le score global ne dit que « mal coté ». Le taux de remplissage figure
+            entre parenthèses : une note flatteuse sur 30 % du parc n'est pas un bon résultat.
+          </p>
+          <ChartCanvas type="bar" height={Math.max(200, contributions.length*46)} data={{
+            labels: contributions.map((c)=>c.label+' ('+Math.round(c.remplissage*100)+'%)'),
+            datasets: [{ label:'Note moyenne', data: contributions.map((c)=>c.moyenne),
+              backgroundColor: contributions.map((c)=>{ const b = bandeAccessibilite(c.moyenne, bandes); return b? ACCESS_BANDE_COULEURS[b.cle] : '#9fb3ae'; }) }]
+          }} options={{ indexAxis:'y', scales:{ x:{ beginAtZero:true, max:100, title:{display:true,text:'Note moyenne / 100'} } },
+            plugins:{ legend:{display:false}, tooltip:{ callbacks:{ label:(ctx)=>{
+              const c = contributions[ctx.dataIndex];
+              return 'Note moyenne '+fmtDec(c.moyenne,1)+' · poids '+c.poids+' · renseigné sur '+Math.round(c.remplissage*100)+'% des résidences';
+            } } } } }} />
+        </div>
+      </div>
+
+      {/* ------- Score moyen par commune / secteur / période ------- */}
+      <div style={{display:'flex',gap:20,flexWrap:'wrap'}}>
+        {[['Score moyen par commune', parCommune], ['Score moyen par secteur / agence', parSecteur]].map(([titre, data])=>(
+          <div key={titre} className="ce-card" style={{flex:1,minWidth:340}}>
+            <h3 style={{fontSize:'.85rem',fontWeight:700,color:'var(--ce-vert-tres-fonce)',marginBottom:12}}>{titre}</h3>
+            {data.length===0 ? <p style={{fontSize:'.75rem',color:'#9fb3ae'}}>Colonne absente ou non renseignée dans ce fichier.</p> : (
+              <ChartCanvas type="bar" height={Math.max(200, data.length*34)} data={{
+                labels: data.map((d)=>d.label),
+                datasets: [{ label:'Score moyen', data: data.map((d)=>d.moyenne),
+                  backgroundColor: data.map((d)=>{ const b=bandeAccessibilite(d.moyenne,bandes); return b? ACCESS_BANDE_COULEURS[b.cle] : '#9fb3ae'; }) }]
+              }} options={{ indexAxis:'y', scales:{ x:{ beginAtZero:true, max:100 } },
+                plugins:{ legend:{display:false}, tooltip:{ callbacks:{ label:(ctx)=>{
+                  const d = data[ctx.dataIndex];
+                  return 'Score moyen '+fmtDec(d.moyenne,1)+' · '+fmtNum(d.n)+' résidences · '+fmtNum(d.lgt)+' logements';
+                } } } } }} />
+            )}
+            <p style={{fontSize:'.68rem',color:'var(--ce-vert-fonce)',marginTop:8}}>
+              10 premières modalités, classées par {unite==='logements'?'nombre de logements':'nombre de résidences'}.
+            </p>
+          </div>
+        ))}
+      </div>
+
+      <div className="ce-card">
+        <h3 style={{fontSize:'.85rem',fontWeight:700,color:'var(--ce-vert-tres-fonce)',marginBottom:4}}>Score moyen par période de construction</h3>
+        <p style={{fontSize:'.7rem',color:'var(--ce-vert-fonce)',marginBottom:12}}>
+          La coupure de 2005 est celle de la loi 2005-102 sur l'accessibilité : c'est le seul repère de
+          ce graphique qui ne soit pas conventionnel, et l'écart qu'on y lit objective — ou non — l'effet
+          de la réglementation sur le patrimoine du bailleur.
+        </p>
+        {parPeriode.length===0 ? <p style={{fontSize:'.75rem',color:'#9fb3ae'}}>Aucune année de construction renseignée dans ce fichier.</p> : (
+          <ChartCanvas type="bar" height={260} data={{
+            labels: parPeriode.map((p)=>p.label),
+            datasets: [{ label:'Score moyen', data: parPeriode.map((p)=>p.moyenne),
+              backgroundColor: parPeriode.map((p)=>{ const b=bandeAccessibilite(p.moyenne,bandes); return b? ACCESS_BANDE_COULEURS[b.cle] : '#9fb3ae'; }) }]
+          }} options={{ scales:{ y:{ beginAtZero:true, max:100, title:{display:true,text:'Score moyen / 100'} } },
+            plugins:{ legend:{display:false}, tooltip:{ callbacks:{ label:(ctx)=>'Score moyen '+fmtDec(parPeriode[ctx.dataIndex].moyenne,1)+' · '+fmtNum(parPeriode[ctx.dataIndex].n)+' résidences' } } } }} />
+        )}
+      </div>
+
+      {/* ------- Table ------- */}
+      <div className="ce-card">
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:10,marginBottom:12}}>
+          <h3 style={{fontSize:'.85rem',fontWeight:700,color:'var(--ce-vert-tres-fonce)'}}>
+            Résidences ({fmtNum(lignesTable.length)})
+            {kpiFiltre && <span style={{fontWeight:400,color:'var(--ce-vert-fonce)'}}> — filtrées par le KPI sélectionné</span>}
+          </h3>
+          {kpiFiltre && <button className="ce-btn-outline ce-btn-sm" onClick={()=>setKpiFiltre(null)}>Retirer le filtre</button>}
+        </div>
+        <SortableTable columns={colonnes} rows={rows} dense pageSize={25} onRowClick={(x)=>onSelectResidence && onSelectResidence(x.r)} />
       </div>
     </div>
   );
@@ -6936,7 +7179,9 @@ function App({currentUser, onLogout}){
           <ViewAccessibilite
             residences={filteredResidences}
             accessibiliteConfig={accessibiliteConfig}
+            setAccessibiliteConfig={setAccessibiliteConfig}
             echelles={data.accessibiliteEchelles || {}}
+            onSelectResidence={setSelectedResidence}
           />
         )}
         {activeTab==='pivot' && <ViewPivot residences={filteredResidences} operations={filteredOperations} onSelectResidence={setSelectedResidence} customPivotViews={customPivotViews} setCustomPivotViews={setCustomPivotViews} />}
