@@ -5381,10 +5381,39 @@ function ViewOffreNouvelle({residences, operations, offreNouvelleLgt, setOffreNo
 // (origine 'ajout'). Les lignes issues de l'import vivent dans le modèle sans être affichées deux
 // fois — la carte du dessous les restitue déjà depuis `residences`. La table d'échéancier annuel et
 // le moteur de potentiel qui les exploiteront arrivent en Phases 2 et 3.
-function ViewVente({residences, planVenteLignes, setPlanVenteLignes}){
+// Deux unités sur la même grille : c'est précisément ce pour quoi SaisieObjectifsAnnuels porte
+// l'unité au niveau du canal et non de la table.
+const CANAUX_VENTE = [
+  { cle:'logements', label:'Logements vendus', unite:'logements', pas:1,    aide:"Nombre de logements dont la cession est visée dans l'année" },
+  { cle:'produit',   label:'Produit de cession', unite:'€',        pas:1000, aide:"Produit net de cession visé dans l'année" },
+];
+function ViewVente({residences, operations, planVenteLignes, setPlanVenteLignes, objectifsVente, setObjectifsVente}){
   const resByCode = useMemo(()=>{ const m={}; residences.forEach((r)=>m[r.code]=r); return m; }, [residences]);
   const typeVenteSuggestions = useMemo(()=>uniqueSorted(residences.map((r)=>r.typeVente)), [residences]);
   const lignesAjoutees = useMemo(()=>planVenteLignes.filter((l)=>l.origine==='ajout'), [planVenteLignes]);
+
+  // §V8 §2.1 — objectifs annuels de vente. L'état objectifsVente existait déjà dans App, sérialisé
+  // avec la sauvegarde, mais n'avait jamais eu d'interface. Le plan de vente en regard vient de
+  // l'échéancier des lignes retenues : sans ce rappel, un objectif saisi ne se compare à rien.
+  const anneesVente = useMemo(()=>computeYearsRange(operations||[]), [operations]);
+  const planParAnnee = useMemo(()=>{
+    const out = {};
+    (planVenteLignes||[]).forEach((l)=>{
+      if (l.retenue===false) return;
+      Object.keys(l.parAnnee||{}).forEach((y)=>{
+        const e = l.parAnnee[y] || {};
+        const n = Number(e.nbLgt)||0;
+        if (!out[y]) out[y] = { logements:0, produit:0 };
+        out[y].logements += n;
+        // prixUnitaire est déjà en euros PAR LOGEMENT (converti depuis les k€ à la lecture de
+        // « 5. Cessions identifiées ») : le produit annuel est donc volume × prix unitaire.
+        out[y].produit += n * (Number(e.prixUnitaire)||0);
+      });
+    });
+    return out;
+  }, [planVenteLignes]);
+  const totalObjLgt = anneesVente.reduce((s,y)=>s+(Number((objectifsVente[y]||{}).logements)||0), 0);
+  const totalPlanLgt = anneesVente.reduce((s,y)=>s+((planParAnnee[y]||{}).logements||0), 0);
 
   function addVente(){
     if (!residences.length) return;
@@ -5475,6 +5504,48 @@ function ViewVente({residences, planVenteLignes, setPlanVenteLignes}){
         </p>
         <datalist id="ce-type-vente-suggestions">{typeVenteSuggestions.map((t)=><option key={t} value={t} />)}</datalist>
         {lignesAjoutees.length>0 ? <SortableTable columns={ventesSimuleesCols} rows={lignesAjoutees} pageSize={20} /> : <div style={{fontSize:'.78rem',color:'#9fb3ae'}}>Aucune vente simulée pour l'instant.</div>}
+      </div>
+
+      <div className="ce-card">
+        <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700,marginBottom:4}}>Objectifs de vente, par année</h2>
+        <p style={{fontSize:'.72rem',color:'var(--ce-vert-fonce)',marginBottom:12,lineHeight:1.5}}>
+          Le bouton ↦ reporte les valeurs d'une année sur toutes les suivantes. En regard, le plan de
+          vente tel qu'il est aujourd'hui daté : seules les lignes retenues portant un échéancier y
+          figurent, celles sans année ne sont imputées à aucun exercice.
+        </p>
+        <SaisieObjectifsAnnuels annees={anneesVente} canaux={CANAUX_VENTE} valeurs={objectifsVente}
+          setValeurs={setObjectifsVente} titre="Objectif annuel" />
+        <div style={{overflowX:'auto',marginTop:10}}>
+          <table className="ce-table ce-table-dense">
+            <tbody>
+              <tr>
+                <td style={{position:'sticky',left:0,background:'#fff',zIndex:1,fontWeight:600,whiteSpace:'nowrap'}}>Plan de vente daté (logements)</td>
+                {anneesVente.map((y)=>(
+                  <td key={y} style={{textAlign:'right',fontVariantNumeric:'tabular-nums'}}>{fmtNum((planParAnnee[y]||{}).logements||0)}</td>
+                ))}
+              </tr>
+              <tr>
+                <td style={{position:'sticky',left:0,background:'#fff',zIndex:1,fontWeight:600,whiteSpace:'nowrap'}}>Écart à l'objectif</td>
+                {anneesVente.map((y)=>{
+                  const o = Number((objectifsVente[y]||{}).logements)||0;
+                  const p = (planParAnnee[y]||{}).logements||0;
+                  if (!o) return <td key={y} style={{textAlign:'right',color:'#cfdbd7'}}>—</td>;
+                  const d = p-o;
+                  return <td key={y} style={{textAlign:'right',fontWeight:700,fontVariantNumeric:'tabular-nums',
+                    color: d>=0? 'var(--ce-vert-principal)':'var(--ce-corail)'}}>{d>=0?'+':''}{fmtNum(d)}</td>;
+                })}
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        {totalObjLgt>0 && (
+          <p style={{fontSize:'.72rem',color:'var(--ce-vert-fonce)',marginTop:10}}>
+            Sur l'ensemble de la période : {fmtNum(totalPlanLgt)} logements datés au plan de vente pour
+            un objectif de {fmtNum(totalObjLgt)} — <b style={{color: totalPlanLgt>=totalObjLgt? 'var(--ce-vert-principal)':'var(--ce-corail)'}}>
+              {totalPlanLgt-totalObjLgt>=0?'+':''}{fmtNum(totalPlanLgt-totalObjLgt)} logements
+            </b>.
+          </p>
+        )}
       </div>
 
       {hasVente ? (
@@ -7122,7 +7193,10 @@ function AccessibilitePriorisation({candidats, retenues, config,
    générique (années, canaux, libellés) plutôt que spécifique à l'adaptation : la V8 prévoyait le même
    besoin pour les objectifs de vente, dont l'état `objectifsVente` existe déjà sans interface —
    ce composant est directement réutilisable là-bas le jour venu. */
-function SaisieObjectifsAnnuels({annees, canaux, valeurs, setValeurs, unite}){
+// `canaux` : [{cle, label, aide, unite, pas}] — l'unité est portée PAR CANAL et non par la grille,
+// parce qu'un même tableau d'objectifs peut mélanger des volumes et des montants (c'est le cas de la
+// vente : des logements et un produit de cession).
+function SaisieObjectifsAnnuels({annees, canaux, valeurs, setValeurs, titre}){
   function maj(annee, canal, v){
     const n = Object.assign({}, valeurs);
     n[annee] = Object.assign({}, n[annee] || {});
@@ -7142,17 +7216,19 @@ function SaisieObjectifsAnnuels({annees, canaux, valeurs, setValeurs, unite}){
       <table className="ce-table ce-table-dense">
         <thead>
           <tr>
-            <th style={{position:'sticky',left:0,background:'var(--ce-vert-tres-clair)',zIndex:2}}>Objectif ({unite})</th>
+            <th style={{position:'sticky',left:0,background:'var(--ce-vert-tres-clair)',zIndex:2}}>{titre || 'Objectif'}</th>
             {annees.map((y)=><th key={y} style={{textAlign:'right'}}>{y}</th>)}
           </tr>
         </thead>
         <tbody>
           {canaux.map((c)=>(
             <tr key={c.cle}>
-              <td style={{position:'sticky',left:0,background:'#fff',zIndex:1,fontWeight:600,whiteSpace:'nowrap'}} title={c.aide}>{c.label}</td>
+              <td style={{position:'sticky',left:0,background:'#fff',zIndex:1,fontWeight:600,whiteSpace:'nowrap'}} title={c.aide}>
+                {c.label}{c.unite? <span style={{fontWeight:400,color:'var(--ce-vert-fonce)'}}> ({c.unite})</span> : null}
+              </td>
               {annees.map((y)=>(
                 <td key={y} style={{textAlign:'right'}}>
-                  <input className="ce-select" type="number" min="0" step="1" style={{width:78,padding:'2px 6px',textAlign:'right'}}
+                  <input className="ce-select" type="number" min="0" step={c.pas||1} style={{width:c.pas>1?96:78,padding:'2px 6px',textAlign:'right'}}
                     value={(valeurs[y]||{})[c.cle] ?? ''} onChange={(e)=>maj(y, c.cle, e.target.value)} />
                 </td>
               ))}
@@ -7174,8 +7250,8 @@ function SaisieObjectifsAnnuels({annees, canaux, valeurs, setValeurs, unite}){
   );
 }
 const CANAUX_ADAPTATION = [
-  { cle:'reha',   liste:'A', label:'Liste A — via réhabilitation', aide:"Adaptation intégrée à une opération de réhabilitation" },
-  { cle:'diffus', liste:'B', label:'Liste B — en diffus',          aide:"Adaptation isolée, hors réhabilitation" },
+  { cle:'reha',   liste:'A', label:'Liste A — via réhabilitation', unite:'logements', aide:"Adaptation intégrée à une opération de réhabilitation" },
+  { cle:'diffus', liste:'B', label:'Liste B — en diffus',          unite:'logements', aide:"Adaptation isolée, hors réhabilitation" },
 ];
 function AccessibiliteProgrammation({candidats, retenues, operations, accessibiliteConfig, setAccessibiliteConfig,
     adaptationLignes, setAdaptationLignes, objectifsAdaptation, setObjectifsAdaptation, planVenteLignes,
@@ -7293,7 +7369,7 @@ function AccessibiliteProgrammation({candidats, retenues, operations, accessibil
 
             <h4 style={{fontSize:'.78rem',fontWeight:700,color:'var(--ce-vert-tres-fonce)',marginBottom:8}}>Objectifs annuels, par canal</h4>
             <SaisieObjectifsAnnuels annees={annees} canaux={CANAUX_ADAPTATION} valeurs={objectifsAdaptation}
-              setValeurs={setObjectifsAdaptation} unite="logements" />
+              setValeurs={setObjectifsAdaptation} titre="Objectif annuel" />
 
             <h4 style={{fontSize:'.78rem',fontWeight:700,color:'var(--ce-vert-tres-fonce)',margin:'16px 0 8px'}}>Résidences retenues — année, volume et coût</h4>
             <div style={{maxHeight:320,overflowY:'auto',border:'1px solid #eef4f2',borderRadius:8}}>
@@ -8105,11 +8181,14 @@ function App({currentUser, onLogout}){
         {activeTab==='vente' && (
           <ViewVente
             residences={filteredResidences}
+            operations={filteredOperations}
             planVenteLignes={planVenteLignes.filter((v)=>v.resCode===null || filteredCodes.has(v.resCode))}
             setPlanVenteLignes={(next)=>{
               const horsFiltre = planVenteLignes.filter((v)=>v.resCode!==null && !filteredCodes.has(v.resCode));
               setPlanVenteLignes(horsFiltre.concat(next));
             }}
+            objectifsVente={objectifsVente}
+            setObjectifsVente={setObjectifsVente}
           />
         )}
         {activeTab==='accessibilite' && (
