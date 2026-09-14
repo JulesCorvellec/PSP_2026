@@ -349,6 +349,106 @@ function scoreAccessibilite(r, poids){
   return { score:num/den, manquants, presents, couverture: total>0? den/total : 0 };
 }
 
+/* ---- Priorisation de l'adaptation (V9 §4) ----
+   Même principe que le moteur de potentiel de vente (V8 §3) : l'outil propose, l'utilisateur retient.
+   Aucune résidence n'entre automatiquement au plan d'adaptation.
+
+   Le bonus « réhabilitation programmée » porte le poids le plus élevé, et c'est le pivot de tout le
+   dispositif : le coût marginal d'un volet adaptation intégré à une réhabilitation globale est sans
+   commune mesure avec celui d'une intervention isolée. C'est ce qui justifie la scission en deux
+   listes (A intégrée / B en diffus), qui sont deux enveloppes et deux circuits de décision — d'où
+   deux tables distinctes, et non une table unique avec une colonne de distinction. */
+const PRIORITE_ADAPTATION_DEFAUT = {
+  bonus: [
+    { id:'reha_programmee', label:"Réhabilitation programmée sur la période", poids:3, actif:true },
+    { id:'vieillissement',  label:"Vieillissement fort",                     poids:3, actif:true },
+    { id:'petites_typo',    label:"Part de T1-T2-T3 élevée",                 poids:1, actif:true },
+    { id:'individuel',      label:"Logements individuels",                   poids:1, actif:true },
+    { id:'desserte',        label:"Bonne desserte et services de proximité", poids:1, actif:true },
+  ],
+  malus: [
+    { id:'plan_vente',      label:"Résidence au plan de vente",              poids:2, actif:true },
+  ],
+  exclusions: [
+    { id:'demolition',      label:"Démolition programmée",                   actif:true },
+  ],
+};
+// Seuils des deux critères continus. Explicites et nommés plutôt que noyés dans la formule : ce sont
+// des conventions d'atelier, qu'un consultant doit pouvoir citer et discuter.
+const SEUIL_PART_PETITES_TYPO = 0.6;   // T1+T2+T3 sur les typologies renseignées
+const SEUIL_BONNE_DESSERTE = 66;       // moyenne desserte du quartier / commerces de proximité
+
+function evalueCriteresAdaptation(ligne, ctx){
+  const r = ligne.r;
+  const c = ctx || {};
+  const ops = (c.opsParRes && c.opsParRes[r.code]) || [];
+  const rehabs = ops.filter((o)=>familyOfType(o.type)==='Réhabilitation');
+  // Une réhabilitation « programmée » est un calendrier, une réhabilitation « identifiée » une
+  // intention : les deux ouvrent le bonus, mais le libellé ne doit jamais les confondre.
+  const programmee = rehabs.find((o)=>o.statut==='programme') || null;
+  const rehab = programmee || rehabs[0] || null;
+  const demolition = ops.find((o)=>familyOfType(o.type)==='Démolition') || null;
+  const typos = ['T1','T2','T3','T4','T5','T6+'];
+  const totalTypo = typos.reduce((s,t)=>s+(Number(r[t])||0), 0);
+  const petites = ['T1','T2','T3'].reduce((s,t)=>s+(Number(r[t])||0), 0);
+  const partPetites = totalTypo>0 ? petites/totalTypo : null;
+  const notesDesserte = [r.dessertQuartier, r.commercesProximite].filter((v)=>v!==null && v!==undefined && !isNaN(v));
+  const noteDesserte = notesDesserte.length ? notesDesserte.reduce((a,b)=>a+b,0)/notesDesserte.length : null;
+  return {
+    reha_programmee: { actif: !!rehab, applicable:true, operation:rehab, programmee: !!programmee, annee: rehab? rehab.annee : null },
+    vieillissement:  { actif: !!(ligne.tranche && ligne.tranche.cle==='fort'), applicable: !!ligne.tranche },
+    petites_typo:    { actif: partPetites!==null && partPetites>=SEUIL_PART_PETITES_TYPO, applicable: partPetites!==null, valeur: partPetites },
+    individuel:      { actif: ceNorm(r.typeBati)==='individuel', applicable: !!(r.typeBati && String(r.typeBati).trim()) },
+    desserte:        { actif: noteDesserte!==null && noteDesserte>=SEUIL_BONNE_DESSERTE, applicable: noteDesserte!==null, valeur: noteDesserte },
+    plan_vente:      { actif: !!(c.auPlanVente && c.auPlanVente[r.code]), applicable:true },
+    demolition:      { actif: !!demolition, applicable:true, annee: demolition? demolition.annee : null },
+  };
+}
+/* Le score part de l'accessibilité INVERSÉE — plus elle est faible, plus la priorité est haute — et
+   chaque bonus/malus actif vaut 10 points par unité de poids. Le total est ramené sur 0-100 en le
+   divisant par le maximum atteignable avec la configuration courante, sans quoi activer un bonus
+   supplémentaire déplacerait toute l'échelle et rendrait deux exécutions incomparables.
+   `composantes` expose le détail pour que l'interface puisse justifier chaque score : un classement
+   dont on ne peut pas expliquer une ligne ne tient pas dix minutes en atelier. */
+function scorePrioriteAdaptation(ligne, config, ctx){
+  const cfg = config || PRIORITE_ADAPTATION_DEFAUT;
+  const criteres = evalueCriteresAdaptation(ligne, ctx);
+  const exclusion = (cfg.exclusions||[]).find((e)=>e.actif && criteres[e.id] && criteres[e.id].actif) || null;
+  if (exclusion) return { score:null, exclu:true, exclusion, criteres, composantes:[] };
+  if (ligne.score===null) return { score:null, exclu:false, exclusion:null, criteres, composantes:[] };
+  const base = 100 - ligne.score;
+  const composantes = [{ id:'base', label:"Accessibilité faible (score inversé)", points:base }];
+  let points = base, maxBonus = 0;
+  (cfg.bonus||[]).forEach((b)=>{
+    if (!b.actif) return;
+    maxBonus += (b.poids||0)*10;
+    if (criteres[b.id] && criteres[b.id].actif){ points += (b.poids||0)*10; composantes.push({ id:b.id, label:b.label, points:(b.poids||0)*10 }); }
+  });
+  (cfg.malus||[]).forEach((m)=>{
+    if (!m.actif) return;
+    if (criteres[m.id] && criteres[m.id].actif){ points -= (m.poids||0)*10; composantes.push({ id:m.id, label:m.label, points:-(m.poids||0)*10 }); }
+  });
+  const max = 100 + maxBonus;
+  return { score: Math.max(0, Math.min(max, points))/max*100, exclu:false, exclusion:null, criteres, composantes };
+}
+// Liste A (adaptation intégrée à une réhabilitation) ou B (diffus). L'affectation automatique suit la
+// présence d'une réhabilitation ; elle reste surchargeable, et la surcharge doit rester visible.
+function listeAdaptation(criteres, listeForcee){
+  const auto = criteres.reha_programmee.actif ? 'A' : 'B';
+  return { liste: listeForcee || auto, auto, forcee: !!listeForcee && listeForcee!==auto };
+}
+/* Alertes de cohérence (§4.3) — elles informent, elles ne verrouillent jamais. Le jaune est une
+   alerte POSITIVE : une réhabilitation programmée sans volet adaptation retenu est une occasion qui
+   passe, pas une erreur. */
+function alertesAdaptation(ligne, criteres, retenue){
+  const out = [];
+  if (criteres.demolition.actif) out.push({ niveau:'rouge', texte:'Démolition programmée'+(criteres.demolition.annee? ' en '+criteres.demolition.annee : '')+' — adaptation sans objet' });
+  if (criteres.plan_vente.actif) out.push({ niveau:'orange', texte:"Au plan de vente — investissement d'adaptation à questionner" });
+  if (criteres.reha_programmee.actif && !retenue) out.push({ niveau:'jaune', texte:'Opportunité : réhabilitation '+(criteres.reha_programmee.programmee?'programmée':'identifiée')+(criteres.reha_programmee.annee? ' en '+criteres.reha_programmee.annee : '')+', adaptation non retenue' });
+  if (ligne.score!==null && ligne.couverture<0.5) out.push({ niveau:'blanc', texte:'Cotation incomplète — priorité peu fiable' });
+  return out;
+}
+
 const RE_CODE_RESIDENCE = /^code de (residence|batiment)$/;
 function parseBaseCotation(matrix){
   // La colonne d'identifiant s'appelle « Code de Résidence » dans le gabarit Cellance actuel, mais
@@ -6708,7 +6808,215 @@ const ACCESS_PERIODES = [
   { label:'2000 - 2004',   min:2000,      max:2005 },
   { label:'2005 et après', min:2005,      max:Infinity },
 ];
-function ViewAccessibilite({residences, operations, includeIdentifiees, accessibiliteConfig, setAccessibiliteConfig, echelles, onSelectResidence}){
+const ALERTE_STYLES = {
+  rouge:  { pastille:'🔴', couleur:'var(--ce-corail)' },
+  orange: { pastille:'🟠', couleur:'#d98032' },
+  jaune:  { pastille:'🟡', couleur:'#b58a00' },
+  blanc:  { pastille:'⚪', couleur:'#7b8f8a' },
+};
+function PastillesAlertes({alertes}){
+  if (!alertes.length) return <span style={{color:'#cfdbd7'}}>—</span>;
+  return (
+    <span style={{display:'inline-flex',gap:3}}>
+      {alertes.map((a,i)=><span key={i} title={a.texte} style={{cursor:'help'}}>{ALERTE_STYLES[a.niveau].pastille}</span>)}
+    </span>
+  );
+}
+/* §4 — moteur de priorisation et deux listes. Séparé de ViewAccessibilite pour que le bloc reste
+   lisible, mais il partage ses `lignes` : le score d'accessibilité n'est jamais recalculé ici. */
+function AccessibilitePriorisation({lignes, operations, includeIdentifiees, planVenteLignes,
+    accessibiliteConfig, setAccessibiliteConfig, adaptationLignes, setAdaptationLignes, unite, onSelectResidence}){
+  const [showConfig, setShowConfig] = useState(false);
+  const config = (accessibiliteConfig && accessibiliteConfig.priorite) || PRIORITE_ADAPTATION_DEFAUT;
+
+  const ctx = useMemo(()=>{
+    const opsParRes = {};
+    (operations||[]).forEach((o)=>{
+      if (!includeIdentifiees && o.statut==='identifie') return;
+      (opsParRes[o.resCode] = opsParRes[o.resCode] || []).push(o);
+    });
+    const auPlanVente = {};
+    (planVenteLignes||[]).forEach((l)=>{ if (l.retenue!==false && l.resCode!==null && l.resCode!==undefined) auPlanVente[l.resCode] = true; });
+    return { opsParRes, auPlanVente };
+  }, [operations, includeIdentifiees, planVenteLignes]);
+
+  const retenues = useMemo(()=>{
+    const m = {}; (adaptationLignes||[]).forEach((a)=>{ m[a.resCode] = a; }); return m;
+  }, [adaptationLignes]);
+
+  const candidats = useMemo(()=>lignes.map((l)=>{
+    const p = scorePrioriteAdaptation(l, config, ctx);
+    const retenue = retenues[l.r.code] || null;
+    const aff = listeAdaptation(p.criteres, retenue? retenue.listeForcee : null);
+    return Object.assign({}, l, { priorite:p, retenue:!!retenue, listeInfo:aff,
+      alertes: alertesAdaptation(l, p.criteres, !!retenue) });
+  }).sort((a,b)=>{
+    if (a.priorite.exclu !== b.priorite.exclu) return a.priorite.exclu? 1 : -1;
+    return (b.priorite.score??-1) - (a.priorite.score??-1);
+  }), [lignes, config, ctx, retenues]);
+
+  const exclus = candidats.filter((c)=>c.priorite.exclu);
+  const listeA = candidats.filter((c)=>c.retenue && c.listeInfo.liste==='A');
+  const listeB = candidats.filter((c)=>c.retenue && c.listeInfo.liste==='B');
+  const opportunites = candidats.filter((c)=>!c.retenue && !c.priorite.exclu && c.priorite.criteres.reha_programmee.actif);
+  const nbLgt = (arr)=>arr.reduce((s,c)=>s+(c.r.nbLgt||0), 0);
+
+  function basculerRetenue(c){
+    const cur = retenues[c.r.code];
+    if (cur) setAdaptationLignes((adaptationLignes||[]).filter((a)=>a.resCode!==c.r.code));
+    else setAdaptationLignes((adaptationLignes||[]).concat([{ resCode:c.r.code, listeForcee:null }]));
+  }
+  function forcerListe(c, valeur){
+    setAdaptationLignes((adaptationLignes||[]).map((a)=> a.resCode===c.r.code? Object.assign({}, a, { listeForcee: valeur||null }) : a));
+  }
+  function majConfig(next){ setAccessibiliteConfig(Object.assign({}, accessibiliteConfig||{}, { priorite: next })); }
+  function majEntree(famille, id, champ, valeur){
+    const next = Object.assign({}, config);
+    next[famille] = (config[famille]||[]).map((e)=> e.id===id? Object.assign({}, e, { [champ]: valeur }) : e);
+    majConfig(next);
+  }
+
+  const colonnesPriorisation = [
+    { key:'retenir', label:'Retenir', render:(c)=>(
+        <input type="checkbox" checked={c.retenue} disabled={c.priorite.exclu}
+          title={c.priorite.exclu? 'Exclue : '+c.priorite.exclusion.label : ''}
+          onClick={(e)=>e.stopPropagation()} onChange={()=>basculerRetenue(c)} style={{cursor:c.priorite.exclu?'not-allowed':'pointer'}} />
+      ) },
+    { key:'nom', label:'Résidence', render:(c)=>c.r.nom || c.r.code },
+    { key:'commune', label:'Commune', render:(c)=>c.r.commune || '—' },
+    { key:'nbLgt', label:'Lgts', render:(c)=>fmtNum(c.r.nbLgt) },
+    { key:'scoreAcces', label:'Accessibilité', render:(c)=> c.score===null? '—' : fmtDec(c.score,0) },
+    { key:'scorePriorite', label:'Priorité', render:(c)=>{
+        if (c.priorite.exclu) return <span title={c.priorite.exclusion.label} style={{color:'var(--ce-corail)',fontWeight:700}}>exclue</span>;
+        if (c.priorite.score===null) return '—';
+        const detail = c.priorite.composantes.map((x)=>x.label+' : '+(x.points>=0?'+':'')+Math.round(x.points)).join('\n');
+        return <span title={detail} style={{fontWeight:700,cursor:'help'}}>{fmtDec(c.priorite.score,0)}</span>;
+      } },
+    { key:'liste', label:'Liste', render:(c)=>{
+        if (!c.retenue) return <span style={{color:'#9fb3ae'}} title={'Affectation automatique si retenue : '+c.listeInfo.auto}>{c.listeInfo.auto}</span>;
+        return (
+          <span style={{display:'inline-flex',alignItems:'center',gap:4}} onClick={(e)=>e.stopPropagation()}>
+            <select className="ce-select" style={{padding:'2px 6px',fontSize:'.72rem'}}
+              value={(retenues[c.r.code]||{}).listeForcee || ''} onChange={(e)=>forcerListe(c, e.target.value)}>
+              <option value="">Auto ({c.listeInfo.auto})</option>
+              <option value="A">A — via réhabilitation</option>
+              <option value="B">B — en diffus</option>
+            </select>
+            {c.listeInfo.forcee && <span title="Affectation forcée manuellement" style={{fontSize:'.62rem',fontWeight:700,color:'#d98032'}}>forcée</span>}
+          </span>
+        );
+      } },
+    { key:'alertes', label:'Alertes', render:(c)=><PastillesAlertes alertes={c.alertes} /> },
+  ];
+
+  function tableListe(titre, items, explication){
+    return (
+      <div className="ce-card" style={{flex:1,minWidth:360}}>
+        <h3 style={{fontSize:'.85rem',fontWeight:700,color:'var(--ce-vert-tres-fonce)',marginBottom:4}}>{titre}</h3>
+        <p style={{fontSize:'.7rem',color:'var(--ce-vert-fonce)',marginBottom:10,lineHeight:1.5}}>{explication}</p>
+        <div style={{display:'flex',gap:16,marginBottom:10}}>
+          <div><div style={{fontSize:'.64rem',fontWeight:700,color:'var(--ce-vert-fonce)',textTransform:'uppercase'}}>Résidences</div>
+            <div style={{fontSize:'1.2rem',fontWeight:700,color:'var(--ce-vert-principal)'}}>{fmtNum(items.length)}</div></div>
+          <div><div style={{fontSize:'.64rem',fontWeight:700,color:'var(--ce-vert-fonce)',textTransform:'uppercase'}}>Logements des résidences ciblées</div>
+            <div style={{fontSize:'1.2rem',fontWeight:700,color:'var(--ce-vert-principal)'}}>{fmtNum(nbLgt(items))}</div></div>
+        </div>
+        {items.length===0 ? <p style={{fontSize:'.75rem',color:'#9fb3ae'}}>Aucune résidence retenue dans cette liste.</p> : (
+          <div style={{maxHeight:260,overflowY:'auto',border:'1px solid #eef4f2',borderRadius:8}}>
+            <table className="ce-table ce-table-dense">
+              <thead><tr><th>Résidence</th><th>Lgts</th><th>Priorité</th><th>Alertes</th></tr></thead>
+              <tbody>
+                {items.map((c)=>(
+                  <tr key={c.r.code} onClick={()=>onSelectResidence && onSelectResidence(c.r)}>
+                    <td>{c.r.nom || c.r.code}{c.listeInfo.forcee && <span title="Affectation forcée" style={{marginLeft:4,fontSize:'.62rem',color:'#d98032',fontWeight:700}}>forcée</span>}</td>
+                    <td>{fmtNum(c.r.nbLgt)}</td>
+                    <td>{c.priorite.score===null? '—' : fmtDec(c.priorite.score,0)}</td>
+                    <td><PastillesAlertes alertes={c.alertes} /></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <React.Fragment>
+      <div className="ce-card">
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:10,marginBottom:10}}>
+          <h3 style={{fontSize:'.85rem',fontWeight:700,color:'var(--ce-vert-tres-fonce)'}}>Priorisation de l'adaptation</h3>
+          <div style={{display:'flex',gap:6,alignItems:'center'}}>
+            <span style={{fontSize:'.72rem',color:'var(--ce-vert-fonce)'}}>{fmtNum(listeA.length+listeB.length)} retenue{listeA.length+listeB.length>1?'s':''} · {fmtNum(nbLgt(listeA)+nbLgt(listeB))} logements</span>
+            <button className="ce-btn-outline ce-btn-sm" onClick={()=>setShowConfig((v)=>!v)}>{showConfig?'Masquer':'Bonus, malus et exclusions'}</button>
+          </div>
+        </div>
+        <p style={{fontSize:'.7rem',color:'var(--ce-vert-fonce)',lineHeight:1.5,marginBottom:12}}>
+          L'outil propose, vous retenez : aucune résidence n'entre automatiquement au plan d'adaptation.
+          Le score part de l'accessibilité inversée, modulée par les bonus et malus ci-dessous — survolez
+          un score pour en voir la composition. Le bonus <b>réhabilitation programmée</b> porte le poids
+          le plus élevé : le coût marginal d'un volet adaptation intégré à une réhabilitation globale est
+          sans commune mesure avec celui d'une intervention isolée.
+        </p>
+        {showConfig && (
+          <div style={{marginBottom:14,paddingBottom:14,borderBottom:'1px solid #eef4f2'}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
+              <span style={{fontSize:'.72rem',fontWeight:700,color:'var(--ce-vert-fonce)'}}>Chaque critère est activable et pondérable ; 10 points par unité de poids.</span>
+              <button className="ce-btn-outline ce-btn-sm" disabled={!(accessibiliteConfig && accessibiliteConfig.priorite)}
+                onClick={()=>majConfig(undefined)}>Réinitialiser</button>
+            </div>
+            {[['bonus','Bonus'],['malus','Malus'],['exclusions','Exclusions']].map(([fam,titre])=>(
+              <div key={fam} style={{marginBottom:10}}>
+                <div style={{fontSize:'.66rem',fontWeight:700,color:'var(--ce-vert-fonce)',textTransform:'uppercase',marginBottom:6}}>{titre}</div>
+                <div style={{display:'flex',flexWrap:'wrap',gap:14}}>
+                  {(config[fam]||[]).map((e)=>(
+                    <label key={e.id} style={{display:'flex',alignItems:'center',gap:6,fontSize:'.74rem',color:'var(--ce-vert-fonce)'}}>
+                      <input type="checkbox" checked={!!e.actif} onChange={(ev)=>majEntree(fam, e.id, 'actif', ev.target.checked)} style={{cursor:'pointer'}} />
+                      {e.label}
+                      {fam!=='exclusions' && (
+                        <input className="ce-select" type="number" min="0" step="1" style={{width:64,padding:'2px 6px'}}
+                          value={e.poids} onChange={(ev)=>majEntree(fam, e.id, 'poids', Math.max(0, Number(ev.target.value)||0))} />
+                      )}
+                    </label>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        {opportunites.length>0 && (
+          <div className="ce-card" style={{background:'#fff9e6',marginBottom:12,fontSize:'.76rem',lineHeight:1.5}}>
+            🟡 {fmtNum(opportunites.length)} résidence{opportunites.length>1?'s':''} porte{opportunites.length>1?'nt':''} une
+            réhabilitation sans volet adaptation retenu ({fmtNum(nbLgt(opportunites))} logements) — c'est le moment où
+            l'adaptation coûte le moins cher.
+          </div>
+        )}
+        {/* Clés de tri aplaties : SortableTable trie sur row[key], pas sur ce que `render` affiche —
+            sans elles, les colonnes Résidence, Commune et les deux scores seraient inertes au clic. */}
+        <SortableTable columns={colonnesPriorisation} dense pageSize={25}
+          rows={candidats.map((c)=>Object.assign({}, c, {
+            nom: c.r.nom || c.r.code, commune: c.r.commune || '', nbLgt: c.r.nbLgt,
+            scoreAcces: c.score, scorePriorite: c.priorite.score, liste: c.listeInfo.liste,
+          }))}
+          onRowClick={(c)=>onSelectResidence && onSelectResidence(c.r)} />
+        {exclus.length>0 && (
+          <p style={{fontSize:'.7rem',color:'var(--ce-vert-fonce)',marginTop:10}}>
+            {fmtNum(exclus.length)} résidence{exclus.length>1?'s':''} exclue{exclus.length>1?'s':''} du classement
+            (démolition programmée) : elles restent listées, en fin de tableau, plutôt que de disparaître.
+          </p>
+        )}
+      </div>
+
+      <div style={{display:'flex',gap:20,flexWrap:'wrap'}}>
+        {tableListe('Liste A — adaptation intégrée à une réhabilitation', listeA,
+          "Budget investissement, calendrier contraint par l'opération de réhabilitation. C'est la voie la moins coûteuse par logement.")}
+        {tableListe('Liste B — adaptation en diffus', listeB,
+          "Budget d'intervention courante, calendrier libre, souvent déclenché par la sollicitation du locataire. Deux enveloppes et deux circuits de décision distincts de la liste A.")}
+      </div>
+    </React.Fragment>
+  );
+}
+function ViewAccessibilite({residences, operations, includeIdentifiees, planVenteLignes, adaptationLignes, setAdaptationLignes, accessibiliteConfig, setAccessibiliteConfig, echelles, onSelectResidence}){
   const poids = (accessibiliteConfig && accessibiliteConfig.poids) || ACCESSIBILITE_POIDS_DEFAUT;
   const bandes = (accessibiliteConfig && accessibiliteConfig.bandes) || ACCESS_BANDS_DEFAUT;
   const [unite, setUnite] = useState('logements');   // 'logements' | 'residences'
@@ -6975,6 +7283,11 @@ function ViewAccessibilite({residences, operations, includeIdentifiees, accessib
         <AccessibiliteMatrice lignes={lignes} bandes={bandes} unite={unite}
           operations={operations} includeIdentifiees={includeIdentifiees} onSelectResidence={onSelectResidence} />
       )}
+
+      {/* ------- Priorisation et deux listes (§4) ------- */}
+      <AccessibilitePriorisation lignes={lignes} operations={operations} includeIdentifiees={includeIdentifiees}
+        planVenteLignes={planVenteLignes} accessibiliteConfig={accessibiliteConfig} setAccessibiliteConfig={setAccessibiliteConfig}
+        adaptationLignes={adaptationLignes} setAdaptationLignes={setAdaptationLignes} unite={unite} onSelectResidence={onSelectResidence} />
 
       {/* ------- Table ------- */}
       <div className="ce-card">
@@ -7345,6 +7658,9 @@ function App({currentUser, onLogout}){
             residences={filteredResidences}
             operations={filteredOperations}
             includeIdentifiees={includeIdentifiees}
+            planVenteLignes={planVenteLignes.filter((v)=>v.resCode===null || filteredCodes.has(v.resCode))}
+            adaptationLignes={adaptationLignes}
+            setAdaptationLignes={setAdaptationLignes}
             accessibiliteConfig={accessibiliteConfig}
             setAccessibiliteConfig={setAccessibiliteConfig}
             echelles={data.accessibiliteEchelles || {}}

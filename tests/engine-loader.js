@@ -18,6 +18,8 @@ const ENGINE_NAMES = [
   'CLASS_ORDER', 'classIndex', 'findGridKey', 'resolveGain', 'hasKnownDpeGain', 'classeApresGain',
   'computeTrajectory', 'computeTrajectoryByResidence',
   'CRITERES_ACCESSIBILITE', 'ACCESSIBILITE_POIDS_DEFAUT', 'ACCESS_BANDS_DEFAUT', 'TRANCHES_VIEILLISSEMENT',
+  'PRIORITE_ADAPTATION_DEFAUT', 'SEUIL_PART_PETITES_TYPO', 'SEUIL_BONNE_DESSERTE',
+  'evalueCriteresAdaptation', 'scorePrioriteAdaptation', 'listeAdaptation', 'alertesAdaptation',
   'resoudrePartiesCommunes', 'echelleCotation', 'normaliseEchellesAccessibilite',
   'trancheVieillissement', 'bandeAccessibilite', 'scoreAccessibilite', 'libelleChampAccessibilite',
   'DPE_KWH_M2_DEFAUT', 'DPE_KGCO2_M2_DEFAUT', 'FE_VECTEUR_DEFAUT', 'refsDecarbonationDefaut',
