@@ -7573,6 +7573,25 @@ function ViewAccessibilite({residences, operations, includeIdentifiees, planVent
   const [unite, setUnite] = useState('logements');   // 'logements' | 'residences'
   const [kpiFiltre, setKpiFiltre] = useState(null);  // null | 'faible' | 'vieilFort' | 'cible'
   const [showParams, setShowParams] = useState(false);
+  // Clic sur un graphique -> liste des résidences concernées, même convention que la Vue d'ensemble :
+  // un panneau par carte, un second clic sur la même valeur le referme.
+  const [chartPanel, setChartPanel] = useState(null); // {chart, value, title, rows, renderRow}
+  function toggleChartPanel(chart, value, data){
+    setChartPanel((cur)=> (cur && cur.chart===chart && cur.value===value) ? null : Object.assign({chart, value}, data));
+  }
+  // ensembleSimpleResRow affiche le nombre de logements ; ici c'est la NOTE qui permet de décider,
+  // d'où un rendu de ligne propre à cet onglet — les résidences sont listées de la moins bien notée
+  // à la mieux notée, l'ordre dans lequel on les regarde en atelier.
+  function ligneNotee(getNote){
+    return (l)=>(
+      <div onClick={()=>onSelectResidence && onSelectResidence(l.r)}
+        style={{display:'flex',justifyContent:'space-between',gap:8,fontSize:'.76rem',color:'var(--ce-vert-fonce)',padding:'3px 0',borderBottom:'1px solid #f0f5f3',cursor:onSelectResidence?'pointer':'default'}}>
+        <span>{l.r.nom || l.r.code}</span>
+        <span style={{color:'#9fb3ae',flexShrink:0}}>{getNote(l)} · {fmtNum(l.r.nbLgt)} lgt</span>
+      </div>
+    );
+  }
+  const parNoteCroissante = (getNote)=>(a,b)=>(getNote(a)??999)-(getNote(b)??999);
 
   const lignes = useMemo(()=>residences.map((r)=>{
     const s = scoreAccessibilite(r, poids);
@@ -7799,9 +7818,17 @@ function ViewAccessibilite({residences, operations, includeIdentifiees, planVent
               <ChartCanvas type="doughnut" height={260} data={{
                 labels: parBande.map((b)=>b.label),
                 datasets: [{ data: parBande.map((b)=>b.valeur), backgroundColor: parBande.map((b)=>ACCESS_BANDE_COULEURS[b.cle]) }]
-              }} options={{ plugins:{ tooltip:{ callbacks:{ label:(ctx)=> ctx.label+' : '+fmtNum(ctx.raw)+' '+(unite==='logements'?'logements':'résidences') } } } }} />
+              }} options={{ plugins:{ tooltip:{ callbacks:{ label:(ctx)=> ctx.label+' : '+fmtNum(ctx.raw)+' '+(unite==='logements'?'logements':'résidences') } } },
+                onClick:(evt,elements)=>{
+                  if (!elements.length) return;
+                  const b = parBande[elements[0].index];
+                  const rows = cotees.filter((l)=>l.bande && l.bande.cle===b.cle).sort(parNoteCroissante((l)=>l.score));
+                  toggleChartPanel('palier', b.cle, { title:b.label+' — '+rows.length+' résidence'+(rows.length>1?'s':''),
+                    rows, renderRow: ligneNotee((l)=>'score '+fmtDec(l.score,0)) });
+                } }} />
             );
           })()}
+          {chartPanel && chartPanel.chart==='palier' && <ResidenceListPanel title={chartPanel.title} rows={chartPanel.rows} renderRow={chartPanel.renderRow} onClose={()=>setChartPanel(null)} maxHeight={240} />}
         </div>
         <div className="ce-card" style={{flex:1.4,minWidth:380}}>
           <h3 style={{fontSize:'.85rem',fontWeight:700,color:'var(--ce-vert-tres-fonce)',marginBottom:4}}>
@@ -7820,26 +7847,45 @@ function ViewAccessibilite({residences, operations, includeIdentifiees, planVent
             plugins:{ legend:{display:false}, tooltip:{ callbacks:{ label:(ctx)=>{
               const c = contributions[ctx.dataIndex];
               return 'Note moyenne '+fmtDec(c.moyenne,1)+' · poids '+c.poids+' · renseigné sur '+Math.round(c.remplissage*100)+'% des résidences';
-            } } } } }} />
+            } } } },
+            onClick:(evt,elements)=>{
+              if (!elements.length) return;
+              const c = contributions[elements[0].index];
+              // Sur ce graphique, la liste utile n'est pas « les résidences de la catégorie » mais
+              // « les résidences les moins bien notées sur CE critère » : c'est ce qui désigne où agir.
+              const rows = lignes.filter((l)=>l.r[c.cle]!==null && l.r[c.cle]!==undefined).sort(parNoteCroissante((l)=>l.r[c.cle]));
+              toggleChartPanel('critere', c.cle, { title:c.label+' — '+rows.length+' résidence'+(rows.length>1?'s':'')+', de la moins bien notée à la mieux notée',
+                rows, renderRow: ligneNotee((l)=>'note '+fmtDec(l.r[c.cle],0)) });
+            } }} />
+          {chartPanel && chartPanel.chart==='critere' && <ResidenceListPanel title={chartPanel.title} rows={chartPanel.rows} renderRow={chartPanel.renderRow} onClose={()=>setChartPanel(null)} maxHeight={240} />}
         </div>
       </div>
 
       {/* ------- Score moyen par commune / secteur / période ------- */}
       <div style={{display:'flex',gap:20,flexWrap:'wrap'}}>
-        {[['Score moyen par commune', parCommune], ['Score moyen par secteur / agence', parSecteur]].map(([titre, data])=>(
-          <div key={titre} className="ce-card" style={{flex:1,minWidth:340}}>
-            <h3 style={{fontSize:'.85rem',fontWeight:700,color:'var(--ce-vert-tres-fonce)',marginBottom:12}}>{titre}</h3>
-            {data.length===0 ? <p style={{fontSize:'.75rem',color:'#9fb3ae'}}>Colonne absente ou non renseignée dans ce fichier.</p> : (
-              <ChartCanvas type="bar" height={Math.max(200, data.length*34)} data={{
-                labels: data.map((d)=>d.label),
-                datasets: [{ label:'Score moyen', data: data.map((d)=>d.moyenne),
-                  backgroundColor: data.map((d)=>{ const b=bandeAccessibilite(d.moyenne,bandes); return b? ACCESS_BANDE_COULEURS[b.cle] : '#9fb3ae'; }) }]
+        {[{cle:'commune', champ:'commune', titre:'Score moyen par commune', data:parCommune},
+          {cle:'secteur', champ:'secteur', titre:'Score moyen par secteur / agence', data:parSecteur}].map((bloc)=>(
+          <div key={bloc.cle} className="ce-card" style={{flex:1,minWidth:340}}>
+            <h3 style={{fontSize:'.85rem',fontWeight:700,color:'var(--ce-vert-tres-fonce)',marginBottom:12}}>{bloc.titre}</h3>
+            {bloc.data.length===0 ? <p style={{fontSize:'.75rem',color:'#9fb3ae'}}>Colonne absente ou non renseignée dans ce fichier.</p> : (
+              <ChartCanvas type="bar" height={Math.max(200, bloc.data.length*34)} data={{
+                labels: bloc.data.map((d)=>d.label),
+                datasets: [{ label:'Score moyen', data: bloc.data.map((d)=>d.moyenne),
+                  backgroundColor: bloc.data.map((d)=>{ const b=bandeAccessibilite(d.moyenne,bandes); return b? ACCESS_BANDE_COULEURS[b.cle] : '#9fb3ae'; }) }]
               }} options={{ indexAxis:'y', scales:{ x:{ beginAtZero:true, max:100 } },
                 plugins:{ legend:{display:false}, tooltip:{ callbacks:{ label:(ctx)=>{
-                  const d = data[ctx.dataIndex];
+                  const d = bloc.data[ctx.dataIndex];
                   return 'Score moyen '+fmtDec(d.moyenne,1)+' · '+fmtNum(d.n)+' résidences · '+fmtNum(d.lgt)+' logements';
-                } } } } }} />
+                } } } },
+                onClick:(evt,elements)=>{
+                  if (!elements.length) return;
+                  const modalite = bloc.data[elements[0].index].label;
+                  const rows = cotees.filter((l)=>String(l.r[bloc.champ]||'').trim()===modalite).sort(parNoteCroissante((l)=>l.score));
+                  toggleChartPanel(bloc.cle, modalite, { title:modalite+' — '+rows.length+' résidence'+(rows.length>1?'s':''),
+                    rows, renderRow: ligneNotee((l)=>'score '+fmtDec(l.score,0)) });
+                } }} />
             )}
+            {chartPanel && chartPanel.chart===bloc.cle && <ResidenceListPanel title={chartPanel.title} rows={chartPanel.rows} renderRow={chartPanel.renderRow} onClose={()=>setChartPanel(null)} maxHeight={240} />}
             <p style={{fontSize:'.68rem',color:'var(--ce-vert-fonce)',marginTop:8}}>
               10 premières modalités, classées par {unite==='logements'?'nombre de logements':'nombre de résidences'}.
             </p>
@@ -7860,8 +7906,17 @@ function ViewAccessibilite({residences, operations, includeIdentifiees, planVent
             datasets: [{ label:'Score moyen', data: parPeriode.map((p)=>p.moyenne),
               backgroundColor: parPeriode.map((p)=>{ const b=bandeAccessibilite(p.moyenne,bandes); return b? ACCESS_BANDE_COULEURS[b.cle] : '#9fb3ae'; }) }]
           }} options={{ scales:{ y:{ beginAtZero:true, max:100, title:{display:true,text:'Score moyen / 100'} } },
-            plugins:{ legend:{display:false}, tooltip:{ callbacks:{ label:(ctx)=>'Score moyen '+fmtDec(parPeriode[ctx.dataIndex].moyenne,1)+' · '+fmtNum(parPeriode[ctx.dataIndex].n)+' résidences' } } } }} />
+            plugins:{ legend:{display:false}, tooltip:{ callbacks:{ label:(ctx)=>'Score moyen '+fmtDec(parPeriode[ctx.dataIndex].moyenne,1)+' · '+fmtNum(parPeriode[ctx.dataIndex].n)+' résidences' } } },
+            onClick:(evt,elements)=>{
+              if (!elements.length) return;
+              const p = ACCESS_PERIODES.find((x)=>x.label===parPeriode[elements[0].index].label);
+              const rows = cotees.filter((l)=>{ const a=l.r.anneeConstruction; return a!==null && a!==undefined && a>=p.min && a<p.max; })
+                .sort(parNoteCroissante((l)=>l.score));
+              toggleChartPanel('periode', p.label, { title:p.label+' — '+rows.length+' résidence'+(rows.length>1?'s':''),
+                rows, renderRow: ligneNotee((l)=>'score '+fmtDec(l.score,0)+' · '+l.r.anneeConstruction) });
+            } }} />
         )}
+        {chartPanel && chartPanel.chart==='periode' && <ResidenceListPanel title={chartPanel.title} rows={chartPanel.rows} renderRow={chartPanel.renderRow} onClose={()=>setChartPanel(null)} maxHeight={240} />}
       </div>
 
       {/* ------- Matrice de ciblage (§3) ------- */}
