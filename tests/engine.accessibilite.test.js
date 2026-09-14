@@ -167,3 +167,81 @@ describe('CRITERES_ACCESSIBILITE — motifs de détection', () => {
     expect(Math.max.apply(null, Object.values(p))).toBe(p.accessibilitePMR);
   });
 });
+
+describe('migreAccessibiliteData — sauvegardes antérieures à la V9', () => {
+  // Une sauvegarde d'avant la V9 porte des résidences sans les champs d'accessibilité, mais l'ancien
+  // parseur rangeait déjà ces mêmes colonnes dans critereGroups : elles sont donc récupérables.
+  const sauvegardeAncienne = () => ({
+    residences: [{
+      code: 'R1', nbLgt: 50,
+      critereGroups: {
+        programme: { label: 'Programme', values: [
+          { label: 'Accessibilité / Adaptabilité PMR', value: 33 },
+          { label: 'Équipements techniques collectifs', value: 66 },
+          { label: 'Parties communes', value: 100 },
+        ]},
+        technique: { label: 'État technique', values: [
+          { label: 'Parties communes', value: 0 },
+          { label: 'Menuiserie', value: 66 },
+        ]},
+        environnement: { label: 'Environnement urbain', values: [
+          { label: 'Accessibilité et desserte du quartier', value: 66 },
+          { label: 'Équipements commerciaux et services de proximité', value: 100 },
+        ]},
+        social: { label: 'Fragilité sociale', values: [{ label: 'Vieillissement', value: 33 }] },
+      },
+    }],
+  });
+
+  it('reconstruit les sept critères récupérables depuis les groupes de cotation', () => {
+    const r = engine.migreAccessibiliteData(sauvegardeAncienne()).residences[0];
+    expect(r.accessibilitePMR).toBe(33);
+    expect(r.equipementsTechniques).toBe(66);
+    expect(r.dessertQuartier).toBe(66);
+    expect(r.commercesProximite).toBe(100);
+    expect(r.vieillissement).toBe(33);
+  });
+
+  it('distingue les deux « Parties communes », qui portent le même libellé dans deux groupes', () => {
+    const r = engine.migreAccessibiliteData(sauvegardeAncienne()).residences[0];
+    expect(r.partiesCommunesAttr).toBe(100); // groupe programme
+    expect(r.partiesCommunesTech).toBe(0);   // groupe technique — et surtout pas 100
+  });
+
+  it('laisse « Ascenseurs » à null : il n\'appartient à aucun groupe de cotation', () => {
+    const r = engine.migreAccessibiliteData(sauvegardeAncienne()).residences[0];
+    expect(r.ascenseurs).toBeNull();
+  });
+
+  it('marque la donnée comme migrée, pour que l\'interface puisse le dire', () => {
+    expect(engine.migreAccessibiliteData(sauvegardeAncienne()).accessibiliteMigree).toBe(true);
+  });
+
+  it('ne touche pas un import V9, qui porte déjà les champs', () => {
+    const data = { residences: [{ code: 'R1', accessibilitePMR: 66, partiesCommunesTech: 33 }] };
+    expect(engine.migreAccessibiliteData(data)).toBe(data); // même référence : aucun recalcul
+  });
+
+  it('laisse intacte une sauvegarde dont les groupes ne portent aucun critère d\'accessibilité', () => {
+    const data = { residences: [{ code: 'R1', critereGroups: { technique: { values: [{ label: 'Menuiserie', value: 66 }] } } }] };
+    expect(engine.migreAccessibiliteData(data)).toBe(data);
+  });
+
+  it('ne lève pas sur une sauvegarde vide ou malformée', () => {
+    expect(() => engine.migreAccessibiliteData(null)).not.toThrow();
+    expect(() => engine.migreAccessibiliteData({})).not.toThrow();
+    expect(() => engine.migreAccessibiliteData({ residences: [] })).not.toThrow();
+    expect(() => engine.migreAccessibiliteData({ residences: [{ code: 'R1' }] })).not.toThrow();
+  });
+
+  it('redresse l\'échelle des valeurs reconstruites comme à l\'import', () => {
+    // Un gabarit cotant sur 0-3 : la migration doit produire les mêmes valeurs qu'un import frais.
+    const data = { residences: [
+      { code: 'R1', critereGroups: { programme: { values: [{ label: 'Accessibilité / Adaptabilité PMR', value: 3 }] } } },
+      { code: 'R2', critereGroups: { programme: { values: [{ label: 'Accessibilité / Adaptabilité PMR', value: 0 }] } } },
+    ]};
+    const out = engine.migreAccessibiliteData(data);
+    expect(Math.round(out.residences[0].accessibilitePMR)).toBe(100);
+    expect(out.accessibiliteEchelles.accessibilitePMR.libelle).toBe('0-3');
+  });
+});

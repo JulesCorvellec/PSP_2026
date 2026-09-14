@@ -21,6 +21,7 @@ const ENGINE_NAMES = [
   'PRIORITE_ADAPTATION_DEFAUT', 'SEUIL_PART_PETITES_TYPO', 'SEUIL_BONNE_DESSERTE',
   'evalueCriteresAdaptation', 'scorePrioriteAdaptation', 'listeAdaptation', 'alertesAdaptation',
   'resoudrePartiesCommunes', 'echelleCotation', 'normaliseEchellesAccessibilite',
+  'RECUPERATION_ACCESSIBILITE', 'migreAccessibiliteData',
   'trancheVieillissement', 'bandeAccessibilite', 'scoreAccessibilite', 'libelleChampAccessibilite',
   'DPE_KWH_M2_DEFAUT', 'DPE_KGCO2_M2_DEFAUT', 'FE_VECTEUR_DEFAUT', 'refsDecarbonationDefaut',
   'parseTableDpeFe', 'parseVecteursTravaux', 'vecteurInitialResidence', 'repartirEntier',
