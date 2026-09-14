@@ -5492,6 +5492,41 @@ function ViewVente({residences, operations, planVenteLignes, setPlanVenteLignes,
   const totalRealiseLgt = anneesRealise.reduce((s,y)=>s+(Number(((ventesRealisees||{})[y]||{}).logements)||0), 0);
   const totalReference = anneesVente.reduce((s,y)=>s+reference(y).valeur, 0);
 
+  const [uniteVente, setUniteVente] = useState('logements'); // 'logements' | 'produit'
+  const [ventePanel, setVentePanel] = useState(null);        // {annee, title, rows}
+  const enLogements = uniteVente==='logements';
+  const valeur = (o, cle)=>Number((o||{})[cle])||0;
+  const serieObjectif = anneesVente.map((y)=>valeur(objectifsVente[y], uniteVente));
+  const serieRealise  = anneesVente.map((y)=> y<=coupureActuel? valeur((ventesRealisees||{})[y], uniteVente) : null);
+  const seriePlan     = anneesVente.map((y)=> enLogements? ((planParAnnee[y]||{}).logements||0) : ((planParAnnee[y]||{}).produit||0));
+  // Écart en % sur ce qui fait foi : le réalisé d'un exercice clos où il a été saisi, le plan sinon —
+  // même règle que le tableau au-dessus, pour que les deux ne racontent pas deux histoires.
+  const ecartVentePct = anneesVente.map((y,i)=>{
+    const o = serieObjectif[i];
+    if (!o) return null;
+    const r = serieRealise[i];
+    const ref = (y<=coupureActuel && r>0) ? r : seriePlan[i];
+    return (ref-o)/o*100;
+  });
+  const aDesDonneesVente = serieObjectif.some((v)=>v>0) || seriePlan.some((v)=>v>0) || serieRealise.some((v)=>v>0);
+  function ouvrirAnneeVente(annee){
+    const rows = (planVenteLignes||[]).filter((l)=>l.retenue!==false && (Number(((l.parAnnee||{})[annee]||{}).nbLgt)||0)>0);
+    setVentePanel((cur)=> (cur && cur.annee===annee) ? null
+      : { annee, title:annee+' — '+rows.length+' résidence'+(rows.length>1?'s':'')+' au plan de vente', rows });
+  }
+  function ligneVente(l){
+    const r = resByCode[l.resCode] || {};
+    const e = (l.parAnnee||{})[ventePanel.annee] || {};
+    const n = Number(e.nbLgt)||0;
+    const produit = n * (Number(e.prixUnitaire)||0);
+    return (
+      <div key={l.id} style={{display:'flex',justifyContent:'space-between',gap:8,fontSize:'.76rem',color:'var(--ce-vert-fonce)',padding:'3px 0',borderBottom:'1px solid #f0f5f3'}}>
+        <span>{r.nom || l.resCode || '— à sélectionner —'}{l.typeVente? <span style={{color:'#9fb3ae'}}> · {l.typeVente}</span> : null}</span>
+        <span style={{color:'#9fb3ae',flexShrink:0}}>{fmtNum(n)} lgt{produit>0? ' · '+fmtEur(produit) : ''}</span>
+      </div>
+    );
+  }
+
   function addVente(){
     if (!residences.length) return;
     setPlanVenteLignes([{
@@ -5636,6 +5671,43 @@ function ViewVente({residences, operations, planVenteLignes, setPlanVenteLignes,
           astérisque), sur le <b>plan daté</b> pour les autres : comparer un objectif passé à un plan
           plutôt qu'à ce qui a réellement été vendu n'aurait pas de sens.
         </p>
+
+        {aDesDonneesVente && (
+          <div style={{marginTop:16,paddingTop:14,borderTop:'1px solid #eef4f2'}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:10,marginBottom:12}}>
+              <h3 style={{fontSize:'.8rem',fontWeight:700,color:'var(--ce-vert-tres-fonce)'}}>Objectif, réalisé et planifié par année</h3>
+              <div style={{display:'flex',gap:6}}>
+                <button className={enLogements?'ce-btn ce-btn-sm':'ce-btn-outline ce-btn-sm'} onClick={()=>setUniteVente('logements')}>Logements</button>
+                <button className={!enLogements?'ce-btn ce-btn-sm':'ce-btn-outline ce-btn-sm'} onClick={()=>setUniteVente('produit')}>Produit de cession</button>
+              </div>
+            </div>
+            <ChartCanvas type="bar" height={320} plugins={CE_ECART_LABELS_PLUGINS} data={{
+              labels: anneesVente,
+              datasets: [
+                // Réalisé et plan daté ne s'empilent pas : sur une année donnée l'un remplace l'autre
+                // de part et d'autre de la coupure. Deux séries côte à côte rendent la bascule visible.
+                { label:'Réalisé', data: serieRealise, backgroundColor:'#264E46' },
+                { label:'Plan de vente daté', data: seriePlan, backgroundColor:'#58D88B' },
+                { type:'line', label:'Objectif', data: serieObjectif, borderColor:'#009261', backgroundColor:'#009261', pointRadius:3, tension:.2 },
+              ],
+            }} options={{
+              scales:{ y:{ beginAtZero:true, title:{display:true, text: enLogements? 'Logements' : 'Euros'},
+                ticks: enLogements? undefined : { callback:(v)=>fmtKEur(v) } } },
+              // Vendre plus que l'objectif est une bonne nouvelle : mêmes couleurs que le plan
+              // d'adaptation, inverses de celles des graphiques de budget.
+              plugins:{ ceEcartLabels:{ datasetIndex:1, values:ecartVentePct, colorPos:'#009261', colorNeg:'#FF8364' },
+                tooltip:{ callbacks:{ label:(ctx)=> ctx.dataset.label+' : '+(enLogements? fmtNum(ctx.raw)+' lgt' : fmtEur(ctx.raw)) } } },
+              onClick:(evt,elements)=>{ if (elements.length) ouvrirAnneeVente(anneesVente[elements[0].index]); },
+            }} />
+            {ventePanel && <ResidenceListPanel title={ventePanel.title} rows={ventePanel.rows} renderRow={ligneVente} onClose={()=>setVentePanel(null)} maxHeight={240} />}
+            <p style={{fontSize:'.7rem',color:'var(--ce-vert-fonce)',marginTop:10,lineHeight:1.5}}>
+              Le réalisé s'arrête à {coupureActuel}, le plan daté couvre toute la période : la bascule
+              entre les deux séries marque la limite entre bilan et prévision. L'écart annuel en % sous
+              chaque barre suit la même règle que le tableau ci-dessus. Un clic sur une année ouvre les
+              résidences du plan de vente datées de cet exercice.
+            </p>
+          </div>
+        )}
         {totalObjLgt>0 && (
           <p style={{fontSize:'.72rem',color:'var(--ce-vert-fonce)',marginTop:8}}>
             Sur l'ensemble de la période : {fmtNum(totalReference)} logements retenus
