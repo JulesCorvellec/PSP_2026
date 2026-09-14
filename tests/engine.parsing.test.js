@@ -90,6 +90,25 @@ describe('parseBaseCotation — robustesse aux fichiers incomplets/atypiques', (
     expect(result.residences.map((r) => r.code)).toEqual(['R001', 'R002']);
     expect(result.duplicateCodes).toEqual(['R001']);
   });
+
+  it('accepte « Code de Bâtiment » comme identifiant, libellé des gabarits antérieurs', () => {
+    const header = ['Code de Bâtiment', 'Nom Résidence', 'Commune'];
+    const result = engine.parseBaseCotation([header, ['0714.1', 'Résidence A', 'Paris'], ['0721.1', 'Résidence B', 'Orly']]);
+    expect(result.residences.map((r) => r.code)).toEqual(['0714.1', '0721.1']);
+  });
+
+  it('résout la ligne d\'en-tête ET la colonne de code sur le même libellé', () => {
+    // Une detection de ligne plus permissive que celle de la colonne renverrait un en-tête trouvé mais
+    // un codeCol à -1, et toutes les lignes seraient filtrées : import vide sans message explicite.
+    const matrix = [
+      ['Base de cotation du bailleur', null, null],
+      ['Code de Bâtiment', 'Nom Résidence', 'Commune'],
+      ['0714.1', 'Résidence A', 'Paris'],
+    ];
+    const result = engine.parseBaseCotation(matrix);
+    expect(result.headerRowIdx).toBe(1);
+    expect(result.residences.length).toBe(1);
+  });
 });
 
 describe('parseGainsDPE — détection des colonnes A-G par nom, robuste au réordonnancement', () => {

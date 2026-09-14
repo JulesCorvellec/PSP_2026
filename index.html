@@ -196,11 +196,18 @@ function findSheet(sheetNames, pattern){ return sheetNames.find((n)=>pattern.tes
      conventionnalité issue de "dont conventionné", et absente d'un des deux fichiers de référence).
    - "Moyenne - Performance Carbonne" : présente uniquement dans STANDARD, absente d'Aubervilliers —
      réservée à la Tâche B (fiche résidence), non utilisée en Tâche A. */
+const RE_CODE_RESIDENCE = /^code de (residence|batiment)$/;
 function parseBaseCotation(matrix){
-  const headerRowIdx = findHeaderRow(matrix, (row)=>row.some((c)=>ceNorm(c)==='code de residence'));
+  // La colonne d'identifiant s'appelle « Code de Résidence » dans le gabarit Cellance actuel, mais
+  // « Code de Bâtiment » dans les gabarits antérieurs encore en circulation chez les bailleurs
+  // (constaté le 2026-09-14 sur un fichier client reel : 300 colonnes, en-tête ligne 11, sinon
+  // strictement conforme). Le motif est donc élargi aux deux libellés — la détection de la ligne
+  // d'en-tête et celle de la colonne doivent rester rigoureusement alignées, sinon un fichier
+  // reconnu ligne 11 se verrait chercher son code dans une colonne introuvable.
+  const headerRowIdx = findHeaderRow(matrix, (row)=>row.some((c)=>RE_CODE_RESIDENCE.test(ceNorm(c))));
   if (headerRowIdx===-1) return null;
   const header = matrix[headerRowIdx];
-  const codeCol = findColIndex(header,[/^code de residence$/]);
+  const codeCol = findColIndex(header,[RE_CODE_RESIDENCE]);
   const dataRows = matrix.slice(headerRowIdx+1).filter((r)=>r && r[codeCol]!==null && r[codeCol]!==undefined && r[codeCol]!=='');
 
   const idx = {
@@ -1926,7 +1933,7 @@ function ImportScreen({onLoaded, onRestore, onBaseChanged, currentUser, onLogout
     setLoading(false);
     if (reason==='toolarge') setError(`Fichier trop volumineux (maximum ${MAX_IMPORT_FILE_BYTES/1e6} Mo). Vérifiez qu'il s'agit bien d'un export du gabarit Cellance.`);
     else if (reason==='nosheet') setError("Le fichier importé ne contient pas d'onglet « Base de cotation » reconnaissable. Import refusé : le socle minimal n'est pas présent.");
-    else if (reason==='noresidences') setError("L'onglet « Base de cotation » a été trouvé mais aucune résidence n'a pu être lue (colonne « Code de Résidence » introuvable ou onglet vide). Import refusé.");
+    else if (reason==='noresidences') setError("L'onglet « Base de cotation » a été trouvé mais aucune résidence n'a pu être lue (colonne « Code de Résidence » — ou « Code de Bâtiment » sur les gabarits antérieurs — introuvable, ou onglet vide). Import refusé.");
     else if (reason==='timeout') setError("L'analyse du fichier prend anormalement longtemps (plus de 2 minutes) et a été interrompue. Le fichier est peut-être trop volumineux ou corrompu.");
     else setError("Erreur lors de la lecture du fichier" + (message? (' : '+message):'') + ". Vérifiez qu'il s'agit bien d'un fichier PSP au format Excel (.xlsx).");
   }
