@@ -224,6 +224,15 @@ function parseBaseCotation(matrix){
     typeBati: findColIndex(header,[/^typologie$/]),
     modeChauffage: findColIndex(header,[/^mode energie chauffage$/]),
     modeECS: findColIndex(header,[/^mode energie ecs$/]),
+    // V9 §1 — trajectoire de décarbonation. « kWh / m² » est l'entrée JX du calcul Excel (consommation
+    // constatée), « Type chauffage » (Individuel/Collectif/Hybride) complète « Mode énergie chauffage »
+    // pour déduire le facteur d'émission de départ (entrée JY). La colonne « kg CO₂e / m² » existe aussi
+    // dans le gabarit mais n'est PAS reprise : l'Excel ne s'en sert nulle part dans la trajectoire, qui
+    // recalcule les émissions en kWh/m² × facteur d'émission (cf. computeDecarbonation).
+    kwhM2: findColIndex(header,[/^kwh ?\/ ?m.?$/]),
+    // Motif non ancré en fin : l'en-tête du gabarit porte un retour à la ligne et sa légende
+    // (« Type chauffage ⏎ Individuel/Collectif »), que ceNorm ramène à un espace.
+    typeChauffage: findColIndex(header,[/^type chauffage/]),
     dontConventionne: findColIndex(header,[/^dont conventionne$/]),
     dontFoyer: findColIndex(header,[/^dont foyer/]),
     financement: findColIndex(header,[/^financement$/]),
@@ -407,6 +416,8 @@ function parseBaseCotation(matrix){
       typeBati: idx.typeBati>=0? row[idx.typeBati]:null,
       modeChauffage: idx.modeChauffage>=0? row[idx.modeChauffage]:null,
       modeECS: idx.modeECS>=0? row[idx.modeECS]:null,
+      kwhM2: idx.kwhM2>=0? ceNum(row[idx.kwhM2]):null,
+      typeChauffage: idx.typeChauffage>=0? row[idx.typeChauffage]:null,
       dontConventionne: idx.dontConventionne>=0? ceNum(row[idx.dontConventionne]):null,
       dontFoyer: idx.dontFoyer>=0? ceNum(row[idx.dontFoyer]):null,
       performanceCarbone: idx.performanceCarbone>=0? ceNum(row[idx.performanceCarbone]):null,
@@ -739,6 +750,16 @@ function resolveGain(op, gainsGrid, metric){
 function hasKnownDpeGain(op, gainsGrid){
   return resolveGain(op, gainsGrid, 'energie')!==null;
 }
+// Classe atteinte par un logement de classe `cl` après un gain de `g` étiquettes. Clamp bas ET haut :
+// un gain négatif (grille de gains DPE mal saisie) ne doit jamais sortir de CLASS_ORDER (sinon
+// CLASS_ORDER[-1] est undefined et les logements concernés disparaissent silencieusement de tous les
+// totaux futurs de la trajectoire). Partagée par la cascade et par computeDecarbonation, qui a besoin
+// de savoir si un logement a réellement bougé — un gain non nul mais écrêté ne le déplace pas.
+function classeApresGain(cl, g){
+  const idx = classIndex(cl);
+  if (idx===null) return cl;
+  return CLASS_ORDER[Math.max(0, Math.min(CLASS_ORDER.length-1, idx+(g||0)))];
+}
 function computeTrajectory(residences, operations, gainsGrid, years, metric, includeIdentifiees, onYearEnd){
   const distKey = metric==='energie'? 'distEnergie':'distGES';
   const state={}, alive={};
@@ -764,11 +785,7 @@ function computeTrajectory(residences, operations, gainsGrid, years, metric, inc
         const next = {A:0,B:0,C:0,D:0,E:0,F:0,G:0,NR:dist.NR||0};
         CLASS_ORDER.forEach((cl)=>{
           const n = dist[cl]||0; if (n<=0) return;
-          const idx = classIndex(cl); const g = gain[cl]||0;
-          // Clamp bas ET haut : un gain négatif (grille de gains DPE mal saisie) ne doit jamais
-          // sortir de CLASS_ORDER (sinon CLASS_ORDER[-1] est undefined et les logements concernés
-          // disparaissent silencieusement de tous les totaux futurs de la trajectoire).
-          const newCl = CLASS_ORDER[Math.max(0, Math.min(6, idx+g))];
+          const newCl = classeApresGain(cl, gain[cl]||0);
           next[newCl] = (next[newCl]||0) + n;
         });
         state[r.code]=next;
@@ -804,6 +821,383 @@ function computeTrajectoryByResidence(residences, operations, gainsGrid, echeanc
     residences.forEach((r)=>{ finalState[r.code]=Object.assign({A:0,B:0,C:0,D:0,E:0,F:0,G:0,NR:0}, r[distKey]||{}); finalAlive[r.code]=true; });
   }
   return { state: finalState, alive: finalAlive };
+}
+
+/* ---- Trajectoire de décarbonation (V9 §1) ----
+   Transposition dans l'outil de la méthode de calcul déjà portée par le gabarit Excel : les colonnes
+   masquées JX→KK en fin de « 1. Base de cotation », alimentées par « 4. Table DPE et FE » (valeurs
+   moyennes par classe + facteurs d'émission) et « 2. Table de ref prix » (vecteur visé par une nature
+   de travaux), puis agrégées par la feuille « 4. Trajectoire décarbonation » :
+     JX  kWh/m² constaté de la résidence (colonne « kWh / m² »)
+     JY  facteur d'émission initial, déduit du couple (Mode énergie chauffage × Type chauffage)
+     KB  kWh/m² après travaux = JX si la classe DPE n'a pas bougé, sinon la valeur moyenne
+         conventionnelle de la nouvelle classe (A 70 · B 90 · C 145 · D 210 · E 290 · F 375 · G 420)
+     KC  facteur d'émission après travaux = celui du vecteur cible d'un « Chgt de vecteur », sinon JY
+     KJ  (KB − JX) × SHAB           — gain de consommation de l'année
+     KK  (KB×KC − JX×JY) × SHAB     — gain d'émissions de l'année
+   Deux écarts assumés avec l'Excel, tous deux dans le sens d'une plus grande finesse — c'est ce qui
+   permet à la trajectoire de se déplacer quand une opération est ajoutée ou modifiée dans l'outil,
+   alors que l'Excel la fige à l'import :
+   - l'Excel n'accorde qu'UN saut de classe et UNE année par résidence (colonne KI = première opération
+     « Réha. » ou « Chgt de vecteur ») ; ici la règle KB est rejouée à chaque année de la cascade DPE
+     existante (computeTrajectory), donc les opérations successives se cumulent ;
+   - l'Excel raisonne sur la classe DPE unique de la résidence ; ici la résidence porte une distribution
+     A-G/NR, donc la SHAB est ventilée au prorata des logements par classe et seuls les logements ayant
+     réellement changé de classe basculent sur la valeur conventionnelle — les autres conservent le
+     kWh/m² constaté, ce qui est exactement le IF(AQ=IC ; JX ; …) de KB appliqué logement par logement.
+   Le gain annuel n'est jamais recalculé opération par opération : il se déduit de l'écart entre deux
+   années consécutives de consommation/émissions, comme la feuille Excel qui cumule (C8 = B8 + C7). */
+const DPE_KWH_M2_DEFAUT = {A:70,B:90,C:145,D:210,E:290,F:375,G:420};
+const DPE_KGCO2_M2_DEFAUT = {A:6,B:9,C:20,D:40,E:60,F:85,G:100};
+// Facteurs d'émission (kgCO2e/kWh) par vecteur, indexés sur le libellé NORMALISÉ du vecteur — mêmes
+// clés que la colonne « Type d'énergie » de « 4. Table DPE et FE » et que la colonne « Projection nvx
+// vecteur » de « 2. Table de ref prix », ce qui permet d'utiliser un seul dictionnaire pour l'état
+// initial et pour l'état d'arrivée d'un changement de vecteur.
+const FE_VECTEUR_DEFAUT = {
+  'collectif - gaz':0.244, 'collectif - electrique':0.058, 'collectif - fioul':0.324,
+  'collectif - bois et granule':0.03, 'collectif - biomethane':0.044,
+  'collectif - geothermie':0.045, 'collectif - photovoltaique':0.044,
+  'individuel - gaz':0.244, 'individuel - electrique':0.052, 'individuel - fioul':0.324,
+  'individuel - bois et granule':0.03, 'individuel - biomethane':0.044,
+  'chaufferie urbain':0.055,
+};
+function refsDecarbonationDefaut(){
+  return {
+    kwhM2: Object.assign({}, DPE_KWH_M2_DEFAUT),
+    kgCo2M2: Object.assign({}, DPE_KGCO2_M2_DEFAUT),
+    fe: Object.assign({}, FE_VECTEUR_DEFAUT),
+    vecteurs: {},
+    origine: { table:false, vecteurs:false },
+  };
+}
+// Onglet « 4. Table DPE et FE » — optionnel comme « 5. Cessions identifiées » : son absence fait
+// simplement retomber sur les valeurs de repli ci-dessus, jamais sur un écran vide. Les deux blocs
+// (bornes/moyennes par classe, puis facteurs d'émission par vecteur) sont repérés par nom d'en-tête,
+// jamais par position, le gabarit client pouvant décaler les lignes.
+function parseTableDpeFe(matrix){
+  if (!matrix || !matrix.length) return null;
+  const out = refsDecarbonationDefaut();
+  let trouve = false;
+  // Le bloc supérieur porte deux colonnes « valeur moy » : la première sous « GES » (kgCO2/m²), la
+  // seconde sous « Thermique » (kWh/m²) — l'ordre des deux blocs de l'onglet.
+  const hdrIdx = findHeaderRow(matrix, (row)=>findAllColIndices(row, /^valeur moy/).length>=2, matrix.length);
+  if (hdrIdx>=0){
+    const cols = findAllColIndices(matrix[hdrIdx], /^valeur moy/);
+    for (let r=hdrIdx+1; r<matrix.length; r++){
+      const cl = ceNorm((matrix[r]||[])[0]).toUpperCase();
+      if (CLASS_ORDER.indexOf(cl)===-1) continue;
+      const ges = ceNum(matrix[r][cols[0]]), kwh = ceNum(matrix[r][cols[1]]);
+      if (ges!==null){ out.kgCo2M2[cl]=ges; trouve=true; }
+      if (kwh!==null){ out.kwhM2[cl]=kwh; trouve=true; }
+    }
+  }
+  const feHdr = findHeaderRow(matrix, (row)=>row.some((c)=>/^type d.?energie$/.test(ceNorm(c))), matrix.length);
+  if (feHdr>=0){
+    const colLabel = findColIndex(matrix[feHdr], [/^type d.?energie$/]);
+    const colVal = findColIndex(matrix[feHdr], [/^valeur$/]);
+    if (colLabel>=0 && colVal>=0){
+      for (let r=feHdr+1; r<matrix.length; r++){
+        const lab = ceNorm((matrix[r]||[])[colLabel]);
+        const val = ceNum((matrix[r]||[])[colVal]);
+        if (!lab || val===null) continue;
+        out.fe[lab] = val; trouve = true;
+      }
+    }
+  }
+  if (!trouve) return null;
+  out.origine.table = true;
+  return out;
+}
+// Onglet « 2. Table de ref prix », colonne « Projection nvx vecteur » / « Vecteur post interv. » :
+// vecteur énergétique visé par une nature de travaux (c'est la colonne ID de la Base de cotation, qui
+// alimente KC). On balaie toute la feuille plutôt que le seul bloc « Chgt de vecteur » : la colonne
+// existe dans chaque bloc, remplie à « NC » quand la nature ne change aucun vecteur.
+function parseVecteursTravaux(matrix){
+  if (!matrix || !matrix.length) return null;
+  const estEnTete = (n)=>/^(projection nvx vecteur|vecteur post)/.test(n);
+  const cols = [];
+  matrix.forEach((row)=>{
+    (row||[]).forEach((cell,i)=>{ if (estEnTete(ceNorm(cell)) && cols.indexOf(i)===-1) cols.push(i); });
+  });
+  if (!cols.length) return null;
+  const out = {};
+  matrix.forEach((row)=>{
+    const nature = (row||[])[0];
+    if (typeof nature!=='string' || !nature.trim()) return;
+    cols.forEach((c)=>{
+      const v = row[c];
+      if (typeof v!=='string') return;
+      const n = ceNorm(v);
+      if (!n || n==='nc' || estEnTete(n)) return;
+      out[ceNorm(nature)] = String(v).trim();
+    });
+  });
+  return Object.keys(out).length? out : null;
+}
+// Assemble les deux référentiels optionnels en un seul objet, avec repli sur les valeurs Cellance
+// pour chaque bloc manquant. Appelé à l'identique par le worker d'import et par le repli thread
+// principal — un écart entre les deux produirait des imports différents selon le navigateur.
+function buildRefsDecarbonation(wb){
+  const refs = refsDecarbonationDefaut();
+  const nomTable = findSheet(wb.SheetNames, /table dpe et fe/);
+  if (nomTable){
+    const lu = parseTableDpeFe(sheetToMatrix(wb.Sheets[nomTable]));
+    if (lu){ refs.kwhM2 = lu.kwhM2; refs.kgCo2M2 = lu.kgCo2M2; refs.fe = lu.fe; refs.origine.table = true; }
+  }
+  const nomPrix = findSheet(wb.SheetNames, /table de ref prix/);
+  if (nomPrix){
+    const lu = parseVecteursTravaux(sheetToMatrix(wb.Sheets[nomPrix]));
+    if (lu){ refs.vecteurs = lu; refs.origine.vecteurs = true; }
+  }
+  return refs;
+}
+// Reproduit la cascade JY : le vecteur de départ d'une résidence se déduit du couple (Mode énergie
+// chauffage × Type chauffage). « Hybride » — que l'Excel renvoie lui-même « À ventiler » — et tout
+// couple hors table restent non résolus : la résidence prend alors le facteur moyen du parc.
+function vecteurInitialResidence(r){
+  const mode = ceNorm(r && r.modeChauffage);
+  const type = ceNorm(r && r.typeChauffage);
+  if (!mode || type==='hybride') return null;
+  if (/reseau de chaleur|chaufferie urbain/.test(mode)) return 'chaufferie urbain';
+  if (/geothermie/.test(mode)) return 'collectif - geothermie';
+  if (/photovoltaique/.test(mode)) return 'collectif - photovoltaique';
+  const prefixe = type==='collectif'? 'collectif' : type==='individuel'? 'individuel' : null;
+  if (!prefixe) return null;
+  if (/^gaz/.test(mode)) return prefixe+' - gaz';
+  if (/^electri/.test(mode)) return prefixe+' - electrique';
+  // Écart assumé avec l'Excel, validé avec Jules le 2026-09-14 : sa table (Mode énergie × Type
+  // chauffage) ne prévoit pas « Pompe à chaleur » et renvoie donc « NR », ce qui sort silencieusement
+  // ces résidences de ses totaux d'émissions. Une PAC consomme de l'électricité — et le kWh/m² du DPE
+  // est déjà de l'énergie finale — donc le facteur d'émission de l'électricité s'applique tel quel.
+  // Placé APRÈS la géothermie ci-dessus, qui est une PAC géothermique et garde son propre facteur.
+  if (/pompe a chaleur|^pac\b/.test(mode)) return prefixe+' - electrique';
+  if (/^fioul/.test(mode)) return prefixe+' - fioul';
+  if (/bois|granule/.test(mode)) return prefixe+' - bois et granule';
+  if (/biomethane/.test(mode)) return prefixe+' - biomethane';
+  return null;
+}
+// Répartit un total entier sur des parts fractionnaires (méthode du plus fort reste) : sans cela les
+// colonnes A..G/NR de la répartition, arrondies indépendamment, ne totalisent pas la ligne « Total ».
+function repartirEntier(parts, total){
+  const cles = Object.keys(parts);
+  const bas = {}; let somme = 0;
+  cles.forEach((k)=>{ bas[k] = Math.floor(parts[k]); somme += bas[k]; });
+  let reste = Math.round(total) - somme;
+  const ordre = cles.slice().sort((a,b)=>(parts[b]-Math.floor(parts[b]))-(parts[a]-Math.floor(parts[a])));
+  for (let i=0; reste>0 && i<ordre.length*2; i++){ bas[ordre[i%ordre.length]] += 1; reste--; }
+  for (let i=0; reste<0 && i<ordre.length*2; i++){ const k=ordre[ordre.length-1-(i%ordre.length)]; if (bas[k]>0){ bas[k]-=1; reste++; } }
+  return bas;
+}
+/* Agrégats annuels de la feuille « 4. Trajectoire décarbonation ».
+   `refs`        — sortie de parseTableDpeFe + parseVecteursTravaux (ou refsDecarbonationDefaut()).
+   `mouvements`  — {offreNouvelleLgt:{annee:nb}, ventesParAnnee:{annee:{resCode:nb}}} : livraisons et
+                   cessions, qui ne touchent QUE la répartition DPE — exactement comme l'Excel, dont
+                   les lignes de consommation et d'émissions sont des SUMPRODUCT sur la seule Base de
+                   cotation. Les démolitions, elles, sortent du parc partout (computeTrajectory). */
+function computeDecarbonation(residences, operations, gainsGrid, years, includeIdentifiees, refs, mouvements){
+  // Une sauvegarde antérieure à la V9 ne porte aucun référentiel, et une sauvegarde plus ancienne
+  // pourrait n'en porter qu'une partie : on complète bloc par bloc plutôt que de supposer l'objet
+  // complet (un R.vecteurs absent ferait planter la résolution des changements de vecteur).
+  const D = refsDecarbonationDefaut();
+  const R = Object.assign(D, refs || {});
+  const mvt = mouvements || {};
+  const ops = (operations||[]).filter((o)=> (includeIdentifiees || o.statut!=='identifie') && o.annee!==null && o.annee!==undefined);
+  const classes = ['A','B','C','D','E','F','G','NR'];
+
+  // -- Socle par résidence : distribution d'origine, surface, kWh/m² constaté, vecteur de départ.
+  const socle = {};
+  let shabConnue = 0, lgtShabConnue = 0;
+  (residences||[]).forEach((r)=>{
+    const dist0 = Object.assign({A:0,B:0,C:0,D:0,E:0,F:0,G:0,NR:0}, r.distEnergie||{});
+    const nb0 = classes.reduce((s,cl)=>s+(dist0[cl]||0), 0);
+    socle[r.code] = { r, dist0, nb0, shab: (r.shab>0? r.shab : null), kwh: (r.kwhM2>0? r.kwhM2 : null), vecteur: vecteurInitialResidence(r) };
+    if (r.shab>0 && nb0>0){ shabConnue += r.shab; lgtShabConnue += nb0; }
+  });
+  // Repli « valeur conventionnelle par défaut » pour les données manquantes : surface moyenne par
+  // logement du parc, et facteur d'émission moyen du parc pondéré par la surface.
+  const shabParLgtMoyen = lgtShabConnue>0 ? shabConnue/lgtShabConnue : 0;
+  let feNum = 0, feDen = 0;
+  Object.keys(socle).forEach((code)=>{
+    const s = socle[code];
+    const fe = s.vecteur!==null ? R.fe[s.vecteur] : undefined;
+    const surf = s.shab!==null ? s.shab : shabParLgtMoyen*s.nb0;
+    if (fe!==undefined && surf>0){ feNum += fe*surf; feDen += surf; }
+  });
+  const feMoyen = feDen>0 ? feNum/feDen : 0;
+  const kwhMoyen = (function(){
+    let n=0, d=0;
+    Object.keys(socle).forEach((code)=>{ const s=socle[code]; const surf = s.shab!==null? s.shab : shabParLgtMoyen*s.nb0; if (s.kwh!==null && surf>0){ n += s.kwh*surf; d += surf; } });
+    return d>0? n/d : 0;
+  })();
+  const couverture = { sansKwh:0, sansFe:0, sansShab:0, feMoyenDisponible: feMoyen>0 };
+  Object.keys(socle).forEach((code)=>{
+    const s = socle[code];
+    if (s.kwh===null) couverture.sansKwh++;
+    if (s.vecteur===null || R.fe[s.vecteur]===undefined) couverture.sansFe++;
+    if (s.shab===null) couverture.sansShab++;
+  });
+
+  // -- Changements de vecteur : {resCode: [{annee, vecteur}]}, appliqués au fil des années (le dernier
+  //    changement daté à une année ≤ N fixe le facteur d'émission de cette année-là).
+  const chgtVecteur = {};
+  ops.forEach((o)=>{
+    if (familyOfType(o.type)!=='Changement de vecteur') return;
+    const cible = R.vecteurs[ceNorm(o.nature)] || R.vecteurs[ceNorm(o.type)];
+    if (!cible) return;
+    (chgtVecteur[o.resCode] = chgtVecteur[o.resCode] || []).push({ annee:o.annee, vecteur:ceNorm(cible) });
+  });
+  Object.keys(chgtVecteur).forEach((k)=>chgtVecteur[k].sort((a,b)=>a.annee-b.annee));
+
+  // -- Cascade DPE : on capture l'état par résidence à la fin de chaque année (copie, l'objet `state`
+  //    étant muté d'une année sur l'autre par computeTrajectory).
+  const etats = {};
+  computeTrajectory(residences, operations, gainsGrid, years, 'energie', includeIdentifiees, (y, state, alive)=>{
+    const snap = {};
+    Object.keys(state).forEach((code)=>{ if (alive[code]) snap[code] = Object.assign({}, state[code]); });
+    etats[y] = snap;
+  });
+
+  // -- Comptages annuels d'opérations : filtre de l'Excel (« le DPE évolue réellement ») transposé en
+  //    « le gain de la grille est non nul sur au moins une classe occupée par la résidence l'année
+  //    précédente » — une opération dont la nature n'ouvre aucun gain (Ravalement, Réha non thermique)
+  //    ne gonfle donc pas les barres du graphique.
+  function compteOps(y, famille){
+    const precedent = etats[y-1] || null;
+    let n = 0;
+    ops.forEach((o)=>{
+      if (o.annee!==y || familyOfType(o.type)!==famille) return;
+      const s = socle[o.resCode];
+      if (!s) return;
+      const gain = resolveGain(o, gainsGrid, 'energie');
+      if (gain===null || gain==='DEMOL') return;
+      const dist = (precedent && precedent[o.resCode]) || s.dist0;
+      const bouge = CLASS_ORDER.some((cl)=>(dist[cl]||0)>0 && (gain[cl]||0)>0);
+      if (!bouge) return;
+      n += (o.logements>0? o.logements : s.nb0);
+    });
+    return n;
+  }
+
+  // -- Classes « figées » d'une résidence : celles dont aucun logement n'a encore bougé. La cascade
+  //    applique le gain d'une opération à TOUTE la distribution de la résidence (simplification V1),
+  //    donc un logement de classe d'origine cl n'a pas bougé tant qu'aucune opération appliquée n'a
+  //    déplacé cl — et il est alors toujours dans cl. C'est la condition AQ=IC de la formule KB,
+  //    évaluée logement par logement au lieu de la classe unique de la résidence.
+  const figees = {};
+  // NR reste figée en toute circonstance : la cascade la reporte telle quelle d'une année sur l'autre,
+  // aucun gain ne s'y applique (on ne sait pas de quelle étiquette partent ces logements).
+  Object.keys(socle).forEach((code)=>{ figees[code] = {NR:true}; CLASS_ORDER.forEach((cl)=>{ figees[code][cl]=true; }); });
+  const opsParResAnnee = {};
+  ops.forEach((o)=>{
+    if (!opsParResAnnee[o.resCode]) opsParResAnnee[o.resCode] = {};
+    (opsParResAnnee[o.resCode][o.annee] = opsParResAnnee[o.resCode][o.annee] || []).push(o);
+  });
+
+  // -- Cumuls de cessions (toutes sources de l'onglet Vente portant une année) par résidence.
+  const ventesCum = {};
+  const lignes = [];
+  let consoPrec = null, emissionsPrec = null;
+
+  years.forEach((y)=>{
+    const ventesY = (mvt.ventesParAnnee && mvt.ventesParAnnee[y]) || {};
+    Object.keys(ventesY).forEach((code)=>{ ventesCum[code] = (ventesCum[code]||0) + (Number(ventesY[code])||0); });
+    // Dégel des classes déplacées par les opérations de l'année — avant le calcul de l'année, dans le
+    // même ordre que la cascade (qui applique les opérations de l'année puis enregistre l'état).
+    Object.keys(figees).forEach((code)=>{
+      ((opsParResAnnee[code]||{})[y]||[]).forEach((o)=>{
+        const gain = resolveGain(o, gainsGrid, 'energie');
+        if (gain===null || gain==='DEMOL') return;
+        CLASS_ORDER.forEach((cl)=>{ if (classeApresGain(cl, gain[cl]||0)!==cl) figees[code][cl]=false; });
+      });
+    });
+
+    const etat = etats[y] || {};
+    const repart = {A:0,B:0,C:0,D:0,E:0,F:0,G:0,NR:0};
+    let surface = 0, conso = 0, emissions = 0;
+
+    Object.keys(etat).forEach((code)=>{
+      const s = socle[code];
+      if (!s) return;
+      const dist = etat[code];
+      const total = classes.reduce((acc,cl)=>acc+(dist[cl]||0), 0);
+      const surfRes = s.shab!==null ? s.shab : shabParLgtMoyen*(total||s.nb0);
+      // Facteur d'émission de l'année : dernier changement de vecteur daté à une année ≤ y.
+      let vecteur = s.vecteur;
+      (chgtVecteur[code]||[]).forEach((c)=>{ if (c.annee<=y) vecteur = c.vecteur; });
+      const feRes = (vecteur!==null && R.fe[vecteur]!==undefined) ? R.fe[vecteur] : null;
+      const kwhReel = s.kwh!==null ? s.kwh : null;
+      // Repli du facteur d'émission : le facteur moyen du parc quand au moins une résidence porte un
+      // vecteur exploitable, sinon l'intensité carbone conventionnelle implicite de la classe
+      // (kgCO2e/m² ÷ kWh/m² des tables DPE). Sans ce second repli, un parc dont aucune résidence n'a
+      // de vecteur résolu — chauffages hybrides ou hors table — afficherait des émissions nulles.
+      const feDeClasse = (cl)=>{
+        if (feRes!==null) return feRes;
+        if (feMoyen>0) return feMoyen;
+        return (R.kgCo2M2[cl]>0 && R.kwhM2[cl]>0) ? R.kgCo2M2[cl]/R.kwhM2[cl] : 0;
+      };
+
+      if (total<=0){
+        // Résidence sans répartition DPE exploitable : aucune cascade n'est possible, mais sa surface
+        // et sa consommation constatée comptent dans les totaux — l'Excel les agrège de la même façon,
+        // par un SUMPRODUCT qui ne regarde pas la répartition par étiquette.
+        const kwh0 = kwhReel!==null ? kwhReel : kwhMoyen;
+        surface += surfRes;
+        conso += kwh0*surfRes;
+        emissions += kwh0*surfRes*feDeClasse('NR');
+        return;
+      }
+      const surfParLgt = surfRes/total;
+
+      let consoRes = 0, emissionsRes = 0;
+      classes.forEach((cl)=>{
+        const n = dist[cl]||0;
+        if (n<=0) return;
+        // Règle KB appliquée logement par logement : ceux restés dans leur classe d'origine gardent le
+        // kWh/m² constaté, ceux qui en ont changé prennent la valeur conventionnelle de leur classe.
+        const restes = (figees[code] && figees[code][cl]) ? Math.min(s.dist0[cl]||0, n) : 0;
+        const deplaces = n - restes;
+        const conv = R.kwhM2[cl]!==undefined ? R.kwhM2[cl] : (kwhReel!==null? kwhReel : kwhMoyen);
+        const initial = kwhReel!==null ? kwhReel : conv;
+        const consoCl = surfParLgt * (restes*initial + deplaces*conv);
+        consoRes += consoCl;
+        emissionsRes += consoCl * feDeClasse(cl);
+      });
+      surface += surfRes;
+      conso += consoRes;
+      emissions += emissionsRes;
+
+      // Cessions : elles ne sortent pas la résidence du parc, elles en retirent des logements — répartis
+      // au prorata de la distribution DPE de l'année, faute d'information sur les étiquettes vendues.
+      const vendus = Math.min(ventesCum[code]||0, total);
+      const facteur = total>0 ? (total-vendus)/total : 0;
+      classes.forEach((cl)=>{ repart[cl] += (dist[cl]||0)*facteur; });
+    });
+
+    // Livraisons d'offre nouvelle cumulées : classées « Inconnu » (NR), comme la ligne « Nombre de DPE
+    // énergie inconnu » du tableau de bord des investissements de l'Excel.
+    let neufs = 0;
+    years.forEach((yy)=>{ if (yy<=y) neufs += Number((mvt.offreNouvelleLgt||{})[yy])||0; });
+    repart.NR += neufs;
+
+    const totalLgt = classes.reduce((acc,cl)=>acc+repart[cl], 0);
+    lignes.push({
+      annee: y,
+      surfaceM2: surface,
+      nbLgtRehab: compteOps(y, 'Réhabilitation'),
+      nbChgtVecteur: compteOps(y, 'Changement de vecteur'),
+      gainConsoKwh: consoPrec===null ? 0 : conso-consoPrec,
+      consoKwh: conso,
+      consoKwhM2: surface>0 ? conso/surface : null,
+      gainEmissionsKg: emissionsPrec===null ? 0 : emissions-emissionsPrec,
+      emissionsKg: emissions,
+      emissionsKgM2: surface>0 ? emissions/surface : null,
+      repartition: repartirEntier(repart, totalLgt),
+      totalLgt: Math.round(totalLgt),
+    });
+    consoPrec = conso; emissionsPrec = emissions;
+  });
+
+  return { lignes, couverture, nbResidences: Object.keys(socle).length };
 }
 
 function familyOfType(type){
@@ -1505,6 +1899,9 @@ function ImportScreen({onLoaded, onRestore, onBaseChanged, currentUser, onLogout
       "    var cessionsSheetName = findSheet(wb.SheetNames, /cessions identifiees/);",
       "    var cessions = cessionsSheetName ? parseCessionsIdentifiees(sheetToMatrix(wb.Sheets[cessionsSheetName])) : null;",
       "    var cessionsMatch = matchCessionsToResidences(cessions, cotation.residences);",
+      // V9 §1 — deux onglets optionnels de plus (référentiels de la trajectoire de décarbonation) :
+      // absents, ils font retomber sur les valeurs de repli Cellance, jamais sur un écran vide.
+      "    var refsDecarbo = buildRefsDecarbonation(wb);",
       "    self.postMessage({ ok:true, result:{",
       "      nbOnglets: wb.SheetNames.length, nbCols: cotation.nbCols,",
       "      residences: cotation.residences, operations: cotation.operations,",
@@ -1512,7 +1909,8 @@ function ImportScreen({onLoaded, onRestore, onBaseChanged, currentUser, onLogout
       "      duplicateCodes: cotation.duplicateCodes || [],",
       "      cessionsEcheancier: cessions, hasCessions: !!cessionsSheetName,",
       "      cessionsParResCode: cessionsMatch.parResCode,",
-      "      cessionsOrphelines: cessionsMatch.orphelines.length",
+      "      cessionsOrphelines: cessionsMatch.orphelines.length,",
+      "      refsDecarbo: refsDecarbo",
       "    }});",
       "  } catch(err){ self.postMessage({ok:false, reason:'exception', message: (err && err.message) || String(err)}); }",
       "};",
@@ -1549,6 +1947,7 @@ function ImportScreen({onLoaded, onRestore, onBaseChanged, currentUser, onLogout
       const cessionsSheetName = findSheet(wb.SheetNames, /cessions identifiees/);
       const cessions = cessionsSheetName ? parseCessionsIdentifiees(sheetToMatrix(wb.Sheets[cessionsSheetName])) : null;
       const cessionsMatch = matchCessionsToResidences(cessions, cotation.residences);
+      const refsDecarbo = buildRefsDecarbonation(wb);
       finishWithResult(file.name, {
         nbOnglets: wb.SheetNames.length, nbCols: cotation.nbCols,
         residences: cotation.residences, operations: cotation.operations,
@@ -1557,6 +1956,7 @@ function ImportScreen({onLoaded, onRestore, onBaseChanged, currentUser, onLogout
         cessionsEcheancier: cessions, hasCessions: !!cessionsSheetName,
         cessionsParResCode: cessionsMatch.parResCode,
         cessionsOrphelines: cessionsMatch.orphelines.length,
+        refsDecarbo: refsDecarbo,
       });
     } catch (err){ failWith('exception', err.message); }
   }
@@ -1874,10 +2274,14 @@ const NAV_ITEMS = [
   {id:'ensemble', label:"Vue d'ensemble"},
   {section:'synthese', label:'Synthèse du PSP', tabs:[
     {id:'cotation', label:'Impacts stratégiques'},
-    {id:'dpe', label:'Décarbonation DPE'},
   ]},
+  // V9 §1 — « Décarbonation DPE » quitte la Synthèse pour rejoindre les Orientations stratégiques sous
+  // le nom de la feuille Excel dont elle reprend désormais les tableaux (« 4. Trajectoire
+  // décarbonation »). L'identifiant d'onglet reste 'dpe' : il est stocké dans aucune sauvegarde, mais
+  // le renommer obligerait à toucher toutes les conditions d'affichage pour un gain nul.
   {section:'orientations', label:'Orientations stratégiques', tabs:[
     {id:'invest', label:'Investissements & Entretien du parc'},
+    {id:'dpe', label:'Trajectoire de décarbonation'},
     {id:'offre', label:'Offre nouvelle'},
     {id:'vente', label:'Vente'},
   ]},
@@ -4212,9 +4616,168 @@ function classRangeAG(lo, hi){
   if (i1===-1 || i2===-1) return [];
   return CLASS_ORDER_AG.slice(Math.min(i1,i2), Math.max(i1,i2)+1);
 }
-function ViewDecarbonation({residences, operations, gainsGrid, hasGainsGrid, includeIdentifiees, baseImport, onSelectResidence}){
+/* V9 §1 — restitution de la feuille Excel « 4. Trajectoire décarbonation » : ses graphiques combinés
+   (volume d'opérations en barres, intensité en courbe sur un axe secondaire) et l'intégralité de son
+   tableau annuel. La feuille en porte trois, dont deux quasi identiques : celui qui superpose les deux
+   courbes sur les barres « Nb lgt réhabilités » n'est pas repris, ses deux séries étant déjà lisibles
+   sur les deux graphiques ci-dessous, chacune en regard des opérations qui la font bouger. */
+function fmtDec(n, d){
+  if (n===null || n===undefined || isNaN(n)) return '—';
+  return new Intl.NumberFormat('fr-FR',{minimumFractionDigits:d, maximumFractionDigits:d}).format(n);
+}
+const DECARBO_SECTIONS = [
+  { titre:null, lignes:[
+    { label:'Total m²', get:(x)=>fmtNum(x.surfaceM2) },
+  ]},
+  { titre:'Énergie', lignes:[
+    { label:'Nb lgt réhabilités thermiquement', get:(x)=>fmtNum(x.nbLgtRehab) },
+    { label:'Gain consommation (kWh)', get:(x)=>fmtNum(x.gainConsoKwh), signe:true },
+    { label:'Consommation (GWh)', get:(x)=>fmtDec(x.consoKwh/1e6, 1) },
+    { label:'Consommation (kWh / m²)', get:(x)=>fmtDec(x.consoKwhM2, 1) },
+  ]},
+  { titre:'Empreinte carbone (GES)', lignes:[
+    { label:'Nb chgt de vecteur énergétique', get:(x)=>fmtNum(x.nbChgtVecteur) },
+    { label:'Gain émissions (kgCO2e)', get:(x)=>fmtNum(x.gainEmissionsKg), signe:true },
+    { label:'Émissions (tCO2e)', get:(x)=>fmtDec(x.emissionsKg/1000, 1) },
+    { label:'Émissions (kgCO2e / m²)', get:(x)=>fmtDec(x.emissionsKgM2, 2) },
+  ]},
+];
+function DecarbonationTrajectoire({decarbo, refs, ventesSansAnnee}){
+  const l = decarbo.lignes;
+  const annees = l.map((x)=>x.annee);
+  const classesRepart = ['A','B','C','D','E','F','G','NR'];
+  // Une classe entièrement vide sur toute la trajectoire n'apporte aucune information : on ne la
+  // laisse pas occuper une ligne du tableau (même règle que le graphique de trajectoire empilée).
+  const classesVisibles = classesRepart.filter((cl)=>l.some((x)=>(x.repartition[cl]||0)>0));
+  const cellLabel = {position:'sticky', left:0, background:'#fff', zIndex:1, fontWeight:600, whiteSpace:'nowrap'};
+  const cellLabelTh = Object.assign({}, cellLabel, {background:'var(--ce-vert-tres-clair)', zIndex:2});
+
+  function comboChart(titreBarres, cleBarres, couleurBarres, titreCourbe, cleCourbe, couleurCourbe, uniteCourbe){
+    return (
+      <ChartCanvas type="bar" height={320} data={{
+        labels: annees,
+        datasets: [
+          { label:titreBarres, data:l.map((x)=>x[cleBarres]), backgroundColor:couleurBarres, yAxisID:'y', order:2 },
+          { type:'line', label:titreCourbe, data:l.map((x)=>x[cleCourbe]), borderColor:couleurCourbe, backgroundColor:couleurCourbe, yAxisID:'y1', pointRadius:3, tension:.2, order:1 },
+        ]
+      }} options={{
+        scales:{
+          y:{ beginAtZero:true, position:'left', title:{display:true, text:'Logements'} },
+          // Axe secondaire non forcé à zéro : l'écart entre années serait illisible sur une échelle
+          // partant de 0 alors que l'intensité varie de quelques dizaines d'unités sur dix ans.
+          y1:{ position:'right', grid:{drawOnChartArea:false}, title:{display:true, text:uniteCourbe} },
+        },
+        plugins:{ tooltip:{ callbacks:{ label:(ctx)=> ctx.dataset.label+' : '+(ctx.dataset.type==='line'? fmtDec(ctx.raw,1)+' '+uniteCourbe : fmtNum(ctx.raw)) } } },
+      }} />
+    );
+  }
+
+  return (
+    <React.Fragment>
+      <div className="ce-card">
+        <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700,marginBottom:12}}>
+          Évolution des consommations énergétiques (kWh / m²)
+        </h2>
+        {comboChart('Nb lgt réhabilités thermiquement','nbLgtRehab','#58D88B','Consommation (kWh / m²)','consoKwhM2','#009261','kWh / m²')}
+      </div>
+      <div className="ce-card">
+        <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700,marginBottom:12}}>
+          Évolution des émissions de GES (kgCO2e / m²)
+        </h2>
+        {comboChart('Nb chgt de vecteur énergétique','nbChgtVecteur','#CDF3DC','Émissions (kgCO2e / m²)','emissionsKgM2','#264E46','kgCO2e / m²')}
+      </div>
+      <div className="ce-card">
+        <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700,marginBottom:12}}>
+          Trajectoire de décarbonation — tableau annuel
+        </h2>
+        <div style={{overflowX:'auto'}}>
+          <table className="ce-table ce-table-dense">
+            <thead>
+              <tr>
+                <th style={cellLabelTh}></th>
+                {annees.map((y)=><th key={y} style={{textAlign:'right'}}>{y}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {DECARBO_SECTIONS.map((sec, si)=>(
+                <React.Fragment key={si}>
+                  {sec.titre && (
+                    <tr>
+                      <td style={Object.assign({}, cellLabel, {background:'var(--ce-vert-tres-clair)',fontWeight:700})}>{sec.titre}</td>
+                      {annees.map((y)=><td key={y} style={{background:'var(--ce-vert-tres-clair)'}}></td>)}
+                    </tr>
+                  )}
+                  {sec.lignes.map((ln)=>(
+                    <tr key={ln.label}>
+                      <td style={cellLabel}>{ln.label}</td>
+                      {l.map((x)=>{
+                        const v = ln.get(x);
+                        // Les deux lignes de gain sont négatives quand la trajectoire décarbone :
+                        // on les colore dans ce sens-là (vert = baisse), inverse des lignes de budget.
+                        const couleur = ln.signe? (String(v).trim().startsWith('-')? 'var(--ce-vert-principal)' : (v==='0'? 'inherit' : 'var(--ce-corail)')) : 'inherit';
+                        return <td key={x.annee} style={{textAlign:'right',fontVariantNumeric:'tabular-nums',color:couleur}}>{v}</td>;
+                      })}
+                    </tr>
+                  ))}
+                </React.Fragment>
+              ))}
+              <tr>
+                <td style={Object.assign({}, cellLabel, {background:'var(--ce-vert-tres-clair)',fontWeight:700})}>Répartition des DPE énergie (nombre de logements)</td>
+                {l.map((x)=><td key={x.annee} style={{background:'var(--ce-vert-tres-clair)',textAlign:'right',fontWeight:700,fontVariantNumeric:'tabular-nums'}}>{fmtNum(x.totalLgt)}</td>)}
+              </tr>
+              {classesVisibles.map((cl)=>(
+                <tr key={cl}>
+                  <td style={cellLabel}>{cl==='NR'? 'Inconnu' : <DpeBadge cl={cl} />}</td>
+                  {l.map((x)=><td key={x.annee} style={{textAlign:'right',fontVariantNumeric:'tabular-nums'}}>{fmtNum(x.repartition[cl]||0)}</td>)}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p style={{fontSize:'.7rem',color:'var(--ce-vert-fonce)',marginTop:12,lineHeight:1.5}}>
+          <b>Méthodologie</b> — reprise de celle du gabarit Excel (colonnes de calcul en fin de « Base de
+          cotation »). Chaque logement conserve le kWh/m² constaté de sa résidence tant qu'il n'a pas
+          changé de classe DPE ; dès qu'il en change, il prend la valeur moyenne conventionnelle de sa
+          nouvelle classe (A {fmtNum(refs.kwhM2.A)} · C {fmtNum(refs.kwhM2.C)} · E {fmtNum(refs.kwhM2.E)} ·
+          G {fmtNum(refs.kwhM2.G)} kWh/m²). Les émissions sont le produit de cette consommation par le
+          facteur d'émission du vecteur de la résidence, qui évolue à l'année d'un « Changement de
+          vecteur ». Les gains annuels sont l'écart entre deux années consécutives : toute opération
+          ajoutée ou modifiée dans l'outil déplace donc la trajectoire, contrairement à l'Excel qui la
+          fige à l'import.
+        </p>
+        <p style={{fontSize:'.7rem',color:'var(--ce-vert-fonce)',marginTop:8,lineHeight:1.5}}>
+          <b>Périmètre</b> — consommation, émissions et Total m² portent sur le parc vivant : une
+          démolition en sort la résidence. La répartition DPE ajoute en outre les livraisons d'offre
+          nouvelle (classées « Inconnu », faute d'étiquette connue à ce stade) et retranche les logements
+          cédés, répartis au prorata des étiquettes de la résidence l'année de la cession — comme le fait
+          la feuille Excel, dont les lignes de consommation restent en revanche calculées sur la seule
+          Base de cotation.
+          {ventesSansAnnee>0 && (
+            <span> {ventesSansAnnee} ligne{ventesSansAnnee>1?'s':''} du plan de vente ne porte{ventesSansAnnee>1?'nt':''} aucune
+            année : elle{ventesSansAnnee>1?'s ne sont':' n\'est'} retranchée{ventesSansAnnee>1?'s':''} d'aucun exercice.</span>
+          )}
+        </p>
+        {(decarbo.couverture.sansKwh>0 || decarbo.couverture.sansFe>0 || decarbo.couverture.sansShab>0) && (
+          <p style={{fontSize:'.7rem',color:'var(--ce-vert-fonce)',marginTop:8,lineHeight:1.5}}>
+            <b>Données estimées</b> — sur {fmtNum(decarbo.nbResidences)} résidences :
+            {decarbo.couverture.sansKwh>0 && <span> {fmtNum(decarbo.couverture.sansKwh)} sans « kWh / m² » (valeur moyenne de leur classe DPE appliquée) ;</span>}
+            {decarbo.couverture.sansFe>0 && <span> {fmtNum(decarbo.couverture.sansFe)} sans vecteur énergétique exploitable — chauffage hybride ou mode absent de la table ({decarbo.couverture.feMoyenDisponible? 'facteur d\'émission moyen du parc appliqué' : 'aucun vecteur exploitable sur l\'ensemble du parc : intensité carbone conventionnelle de chaque classe DPE appliquée'}) ;</span>}
+            {decarbo.couverture.sansShab>0 && <span> {fmtNum(decarbo.couverture.sansShab)} sans SHAB (surface moyenne par logement du parc appliquée) ;</span>}
+            {' '}ces résidences restent comptées dans les totaux.
+          </p>
+        )}
+        <p style={{fontSize:'.7rem',color:'var(--ce-vert-fonce)',marginTop:8,lineHeight:1.5}}>
+          <b>Référentiels</b> — valeurs moyennes par classe DPE et facteurs d'émission :
+          {refs.origine.table? ' onglet « 4. Table DPE et FE » du fichier importé' : ' valeurs Cellance par défaut (onglet « 4. Table DPE et FE » absent du fichier)'} ;
+          vecteur visé par une nature de travaux :
+          {refs.origine.vecteurs? ' onglet « 2. Table de ref prix » du fichier importé' : ' non disponible (onglet « 2. Table de ref prix » absent — les changements de vecteur ne font alors pas évoluer le facteur d\'émission)'}.
+        </p>
+      </div>
+    </React.Fragment>
+  );
+}
+function ViewDecarbonation({residences, operations, gainsGrid, hasGainsGrid, includeIdentifiees, baseImport, onSelectResidence, refsDecarbo, offreNouvelleLgt, planVenteLignes}){
   const [metric, setMetric] = useState('energie');
-  const [compare, setCompare] = useState(defaultCompareState());
   const years = useMemo(()=>computeYearsRange(operations), [operations]);
   const classes = ['A','B','C','D','E','F','G','NR'];
   // Panneau ouvert au clic sur la trajectoire empilée ou le avant/après (§3 — un clic isole une
@@ -4243,7 +4806,6 @@ function ViewDecarbonation({residences, operations, gainsGrid, hasGainsGrid, inc
   const [repartYear, setRepartYear] = useState(null);
   useEffect(()=>{ if (years.length && !years.includes(repartYear)) setRepartYear(years[years.length-1]); }, [years]);
   const final = trajectory && repartYear!==null ? trajectory[repartYear] : null;
-  const bestShare = (d)=> d ? ((d.A+d.B+d.C) / Math.max(1, classes.reduce((s,c)=>s+d[c],0)) * 100) : null;
   const rangeShare = (d, lo, hi)=>{
     if (!d) return null;
     const range = classRangeAG(lo, hi);
@@ -4262,33 +4824,45 @@ function ViewDecarbonation({residences, operations, gainsGrid, hasGainsGrid, inc
   const dpeCardShare = trajectory && dpeCardYear!==null ? rangeShare(trajectory[dpeCardYear], dpeCardLo, dpeCardHi) : null;
 
   const hasCompareBase = !!(baseImport && baseImport.data.hasGainsGrid);
-  const compareState = clampCompareState(compare, hasCompareBase);
   const cutoffActuel = useMemo(()=>anneeCoupureActuel(), []);
   const baseTrajectory = useMemo(()=>{
     if (!hasCompareBase) return null;
     const baseYears = computeYearsRange(baseImport.simOperations||[]);
     return { years: baseYears, traj: computeTrajectory(baseImport.data.residences, baseImport.simOperations||[], baseImport.data.gainsGrid||{}, baseYears, metric, baseImport.includeIdentifiees) };
   }, [baseImport, hasCompareBase, metric]);
-  const baseShareByYear = useMemo(()=>{
-    if (!baseTrajectory) return null;
-    return years.map((y)=>{
-      const idx = baseTrajectory.years.indexOf(y);
-      const d = idx>=0? baseTrajectory.traj[baseTrajectory.years[idx]] : null;
-      return d? bestShare(d) : null;
+
+  // V9 §1 — agrégats annuels de la feuille Excel « 4. Trajectoire décarbonation ». Les cessions sont
+  // celles de l'onglet Vente qui portent une année (l'échéancier importé et les lignes ajoutées dans
+  // l'outil) : une ligne de plan de vente sans année ne peut être imputée à aucun exercice, elle est
+  // comptée à part pour être signalée sous le tableau plutôt que silencieusement ignorée.
+  const ventes = useMemo(()=>{
+    const parAnnee = {}; let sansAnnee = 0;
+    (planVenteLignes||[]).forEach((l)=>{
+      if (l.retenue===false) return;
+      const annees = Object.keys(l.parAnnee||{});
+      if (!annees.length){ sansAnnee++; return; }
+      let compte = 0;
+      annees.forEach((y)=>{
+        const n = Number((l.parAnnee[y]||{}).nbLgt)||0;
+        if (n<=0) return;
+        compte += n;
+        if (!parAnnee[y]) parAnnee[y] = {};
+        parAnnee[y][l.resCode] = (parAnnee[y][l.resCode]||0) + n;
+      });
+      if (compte===0) sansAnnee++;
     });
-  }, [baseTrajectory, years]);
-  // Cible = trajectoire complète (déjà calculée ci-dessus) ; Actuel s'arrête à anneeCoupureActuel()
-  // (ligne interrompue au-delà, cf. convention ViewInvestissements) — les deux dérivent de la même
-  // `trajectory`, jamais recalculées indépendamment (cf. §2.1 de la spec).
-  const cibleShareByYear = trajectory ? years.map((y)=>bestShare(trajectory[y])) : null;
-  const actuelShareByYear = trajectory ? years.map((y,i)=> y<=cutoffActuel? cibleShareByYear[i] : null) : null;
-  // Delta Actuel évalué à l'année de coupure (dernier point réellement tracé par cette série) ; delta
-  // Cible évalué en fin de trajectoire — chacun comparé à la Base à la même année, pas à l'année de fin
-  // de Base qui peut différer.
-  function shareAtYear(arr, year){ if (!arr) return null; const idx = years.indexOf(year); return idx>=0? arr[idx] : null; }
-  function deltaAtYear(arr, year){ const a = shareAtYear(arr, year), b = shareAtYear(baseShareByYear, year); return (hasCompareBase && a!==null && b!==null) ? a-b : null; }
-  const deltaActuelShare = deltaAtYear(actuelShareByYear, cutoffActuel);
-  const deltaCibleShare = deltaAtYear(cibleShareByYear, years[years.length-1]);
+    return { parAnnee, sansAnnee };
+  }, [planVenteLignes]);
+  // Complété bloc par bloc (sauvegardes antérieures à la V9) et mémoïsé : sans cela l'objet de repli
+  // serait neuf à chaque rendu et relancerait computeDecarbonation en boucle (la référence sert de
+  // dépendance ci-dessous), et refs.origine serait indéfini au premier rendu d'un ancien import.
+  const refs = useMemo(()=>Object.assign(refsDecarbonationDefaut(), refsDecarbo||{}), [refsDecarbo]);
+  const decarbo = useMemo(()=>{
+    if (!hasGainsGrid) return null;
+    return computeDecarbonation(residences, operations, gainsGrid, years, includeIdentifiees, refs, {
+      offreNouvelleLgt: offreNouvelleLgt||{}, ventesParAnnee: ventes.parAnnee,
+    });
+  }, [residences, operations, gainsGrid, years, includeIdentifiees, refs, offreNouvelleLgt, ventes, hasGainsGrid]);
 
   // Carte "Logements classe X-Y" (§10) : en plus de l'année librement choisie ci-dessus, affiche Base
   // (année de la version base — 1re année de sa propre trajectoire, même convention que "Avant
@@ -4425,37 +4999,7 @@ function ViewDecarbonation({residences, operations, gainsGrid, hasGainsGrid, inc
             </p>
             {trajPanel && trajPanel.source==='avantApres' && <ResidenceListPanel title={trajPanel.title} rows={trajPanel.rows} renderRow={trajPanel.renderRow} onClose={()=>setTrajPanel(null)} />}
           </div>
-          <div className="ce-card">
-            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10,flexWrap:'wrap',gap:8}}>
-              <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700}}>Comparaison — Base / Actuel / Cible</h2>
-              <CompareCheckboxes checked={compareState} onChange={setCompare} hasBase={hasCompareBase} />
-            </div>
-            {(deltaActuelShare!==null || deltaCibleShare!==null) && (
-              <div style={{fontSize:'.78rem',color:'var(--ce-vert-fonce)',marginBottom:10}}>
-                Δ logements classe A-C vs base « {baseImport && baseImport.nom} » :{' '}
-                {compareState.actuel && deltaActuelShare!==null && (<span>Actuel ({cutoffActuel}) <b style={{color: deltaActuelShare>=0?'var(--ce-vert-principal)':'var(--ce-corail)'}}>{deltaActuelShare>=0?'+':''}{deltaActuelShare.toFixed(0)} pts</b></span>)}
-                {compareState.actuel && deltaActuelShare!==null && compareState.cible && deltaCibleShare!==null && <span> · </span>}
-                {compareState.cible && deltaCibleShare!==null && (<span>Cible ({years[years.length-1]}) <b style={{color: deltaCibleShare>=0?'var(--ce-vert-principal)':'var(--ce-corail)'}}>{deltaCibleShare>=0?'+':''}{deltaCibleShare.toFixed(0)} pts</b></span>)}
-              </div>
-            )}
-            <ChartCanvas type="line" height={260} data={{
-              labels: years,
-              datasets: [
-                // §14.3 — cf. commentaire équivalent dans ViewInvestissements : aucune résidence
-                // base ne passe les filtres transverses actifs → omettre le dataset plutôt qu'une
-                // ligne plate à 0%, trompeuse.
-                ...(compareState.base && hasCompareBase && baseImport.data.residences.length>0? [{ label:'Base — '+baseImport.nom, data: baseShareByYear, borderColor:COMPARE_COLORS.base, backgroundColor:COMPARE_COLORS.base, pointRadius:2, tension:.2 }] : []),
-                ...(compareState.actuel? [{ label:'Actuel', data: actuelShareByYear, borderColor:COMPARE_COLORS.actuel, backgroundColor:COMPARE_COLORS.actuel, pointRadius:2, tension:.2 }] : []),
-                ...(compareState.cible? [{ label:'Cible', data: cibleShareByYear, borderColor:COMPARE_COLORS.cible, backgroundColor:COMPARE_COLORS.cible, pointRadius:2, tension:.2 }] : []),
-              ]
-            }} options={{ scales:{ y:{ beginAtZero:true, max:100, title:{display:true,text:'% logements classe A-C'} } } }} />
-            <p style={{fontSize:'.7rem',color:'var(--ce-vert-fonce)',marginTop:10,lineHeight:1.5}}>
-              Base = distribution DPE de la version sauvegardée comparée ; Actuel = trajectoire déjà réalisée
-              jusqu'à l'année en cours (ligne interrompue au-delà) ; Cible = trajectoire simulée jusqu'à son
-              terme. Le Δ ci-dessus mesure l'écart en points de % de logements classe A-C entre Actuel/Cible
-              et Base — positif si le plan simulé décarbone plus vite que la Base.
-            </p>
-          </div>
+          {decarbo && <DecarbonationTrajectoire decarbo={decarbo} refs={refs} ventesSansAnnee={ventes.sansAnnee} />}
         </React.Fragment>
       )}
     </div>
@@ -6076,7 +6620,23 @@ function App({currentUser, onLogout}){
             onSelectResidence={setSelectedResidence}
           />
         )}
-        {activeTab==='dpe' && <ViewDecarbonation residences={filteredResidences} operations={filteredOperations} gainsGrid={data.gainsGrid} hasGainsGrid={data.hasGainsGrid} includeIdentifiees={includeIdentifiees} baseImport={baseImportFiltered} onSelectResidence={setSelectedResidence} />}
+        {activeTab==='dpe' && (
+          <ViewDecarbonation
+            residences={filteredResidences}
+            operations={filteredOperations}
+            gainsGrid={data.gainsGrid}
+            hasGainsGrid={data.hasGainsGrid}
+            includeIdentifiees={includeIdentifiees}
+            baseImport={baseImportFiltered}
+            onSelectResidence={setSelectedResidence}
+            // V9 §1 — referentiels lus à l'import (absents des sauvegardes antérieures : la vue
+            // retombe alors sur refsDecarbonationDefaut()), livraisons d'offre nouvelle et plan de
+            // vente, filtrés comme partout ailleurs par les filtres transverses.
+            refsDecarbo={data.refsDecarbo}
+            offreNouvelleLgt={offreNouvelleLgt}
+            planVenteLignes={planVenteLignes.filter((v)=>v.resCode===null || filteredCodes.has(v.resCode))}
+          />
+        )}
         {activeTab==='finance' && <ViewFinance residences={filteredResidences} onSelectResidence={setSelectedResidence} financeSeuils={financeSeuils} setFinanceSeuils={setFinanceSeuils} />}
         {activeTab==='offre' && (
           <ViewOffreNouvelle
