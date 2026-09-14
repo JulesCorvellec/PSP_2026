@@ -6824,36 +6824,9 @@ function PastillesAlertes({alertes}){
 }
 /* §4 — moteur de priorisation et deux listes. Séparé de ViewAccessibilite pour que le bloc reste
    lisible, mais il partage ses `lignes` : le score d'accessibilité n'est jamais recalculé ici. */
-function AccessibilitePriorisation({lignes, operations, includeIdentifiees, planVenteLignes,
-    accessibiliteConfig, setAccessibiliteConfig, adaptationLignes, setAdaptationLignes, unite, onSelectResidence}){
+function AccessibilitePriorisation({candidats, retenues, config,
+    accessibiliteConfig, setAccessibiliteConfig, adaptationLignes, setAdaptationLignes, onSelectResidence}){
   const [showConfig, setShowConfig] = useState(false);
-  const config = (accessibiliteConfig && accessibiliteConfig.priorite) || PRIORITE_ADAPTATION_DEFAUT;
-
-  const ctx = useMemo(()=>{
-    const opsParRes = {};
-    (operations||[]).forEach((o)=>{
-      if (!includeIdentifiees && o.statut==='identifie') return;
-      (opsParRes[o.resCode] = opsParRes[o.resCode] || []).push(o);
-    });
-    const auPlanVente = {};
-    (planVenteLignes||[]).forEach((l)=>{ if (l.retenue!==false && l.resCode!==null && l.resCode!==undefined) auPlanVente[l.resCode] = true; });
-    return { opsParRes, auPlanVente };
-  }, [operations, includeIdentifiees, planVenteLignes]);
-
-  const retenues = useMemo(()=>{
-    const m = {}; (adaptationLignes||[]).forEach((a)=>{ m[a.resCode] = a; }); return m;
-  }, [adaptationLignes]);
-
-  const candidats = useMemo(()=>lignes.map((l)=>{
-    const p = scorePrioriteAdaptation(l, config, ctx);
-    const retenue = retenues[l.r.code] || null;
-    const aff = listeAdaptation(p.criteres, retenue? retenue.listeForcee : null);
-    return Object.assign({}, l, { priorite:p, retenue:!!retenue, listeInfo:aff,
-      alertes: alertesAdaptation(l, p.criteres, !!retenue) });
-  }).sort((a,b)=>{
-    if (a.priorite.exclu !== b.priorite.exclu) return a.priorite.exclu? 1 : -1;
-    return (b.priorite.score??-1) - (a.priorite.score??-1);
-  }), [lignes, config, ctx, retenues]);
 
   const exclus = candidats.filter((c)=>c.priorite.exclu);
   const listeA = candidats.filter((c)=>c.retenue && c.listeInfo.liste==='A');
@@ -7016,7 +6989,301 @@ function AccessibilitePriorisation({lignes, operations, includeIdentifiees, plan
     </React.Fragment>
   );
 }
-function ViewAccessibilite({residences, operations, includeIdentifiees, planVenteLignes, adaptationLignes, setAdaptationLignes, accessibiliteConfig, setAccessibiliteConfig, echelles, onSelectResidence}){
+/* Saisie d'objectifs annuels ventilés par canal, avec report sur les années suivantes. Écrit
+   générique (années, canaux, libellés) plutôt que spécifique à l'adaptation : la V8 prévoyait le même
+   besoin pour les objectifs de vente, dont l'état `objectifsVente` existe déjà sans interface —
+   ce composant est directement réutilisable là-bas le jour venu. */
+function SaisieObjectifsAnnuels({annees, canaux, valeurs, setValeurs, unite}){
+  function maj(annee, canal, v){
+    const n = Object.assign({}, valeurs);
+    n[annee] = Object.assign({}, n[annee] || {});
+    const num = v==='' ? null : Math.max(0, Number(v)||0);
+    if (num===null) delete n[annee][canal]; else n[annee][canal] = num;
+    if (!Object.keys(n[annee]).length) delete n[annee];
+    setValeurs(n);
+  }
+  function dupliquer(annee){
+    const src = valeurs[annee] || {};
+    const n = Object.assign({}, valeurs);
+    annees.filter((y)=>y>annee).forEach((y)=>{ n[y] = Object.assign({}, src); });
+    setValeurs(n);
+  }
+  return (
+    <div style={{overflowX:'auto'}}>
+      <table className="ce-table ce-table-dense">
+        <thead>
+          <tr>
+            <th style={{position:'sticky',left:0,background:'var(--ce-vert-tres-clair)',zIndex:2}}>Objectif ({unite})</th>
+            {annees.map((y)=><th key={y} style={{textAlign:'right'}}>{y}</th>)}
+          </tr>
+        </thead>
+        <tbody>
+          {canaux.map((c)=>(
+            <tr key={c.cle}>
+              <td style={{position:'sticky',left:0,background:'#fff',zIndex:1,fontWeight:600,whiteSpace:'nowrap'}} title={c.aide}>{c.label}</td>
+              {annees.map((y)=>(
+                <td key={y} style={{textAlign:'right'}}>
+                  <input className="ce-select" type="number" min="0" step="1" style={{width:78,padding:'2px 6px',textAlign:'right'}}
+                    value={(valeurs[y]||{})[c.cle] ?? ''} onChange={(e)=>maj(y, c.cle, e.target.value)} />
+                </td>
+              ))}
+            </tr>
+          ))}
+          <tr>
+            <td style={{position:'sticky',left:0,background:'#fff',zIndex:1,fontSize:'.68rem',color:'var(--ce-vert-fonce)'}}>Reporter</td>
+            {annees.map((y)=>(
+              <td key={y} style={{textAlign:'right'}}>
+                <button className="ce-btn-outline ce-btn-sm" style={{padding:'1px 6px',fontSize:'.62rem'}}
+                  title={"Dupliquer les valeurs de "+y+" sur toutes les années suivantes"}
+                  disabled={!valeurs[y]} onClick={()=>dupliquer(y)}>↦</button>
+              </td>
+            ))}
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  );
+}
+const CANAUX_ADAPTATION = [
+  { cle:'reha',   liste:'A', label:'Liste A — via réhabilitation', aide:"Adaptation intégrée à une opération de réhabilitation" },
+  { cle:'diffus', liste:'B', label:'Liste B — en diffus',          aide:"Adaptation isolée, hors réhabilitation" },
+];
+function AccessibiliteProgrammation({candidats, retenues, operations, accessibiliteConfig, setAccessibiliteConfig,
+    adaptationLignes, setAdaptationLignes, objectifsAdaptation, setObjectifsAdaptation, planVenteLignes, onSelectResidence}){
+  const [uniteGraphe, setUniteGraphe] = useState('logements'); // 'logements' | 'montants'
+  const annees = useMemo(()=>computeYearsRange(operations||[]), [operations]);
+  const forfaits = (accessibiliteConfig && accessibiliteConfig.forfaits) || {};
+  const forfaitsSaisis = CANAUX_ADAPTATION.some((c)=>forfaits[c.liste]>0);
+
+  const retenus = candidats.filter((c)=>c.retenue);
+  // Année pré-remplie par l'opération de réhabilitation pour la liste A (§5.1), jamais écrasée : la
+  // saisie manuelle prime, mais l'écart est signalé plutôt que silencieusement accepté.
+  const programme = retenus.map((c)=>{
+    const e = retenues[c.r.code] || {};
+    const anneeReha = c.priorite.criteres.reha_programmee.annee;
+    const anneeAuto = c.listeInfo.liste==='A' ? anneeReha : null;
+    const annee = (e.annee!==null && e.annee!==undefined) ? e.annee : anneeAuto;
+    const logements = (e.logements!==null && e.logements!==undefined) ? e.logements : (c.r.nbLgt||0);
+    const forfait = forfaits[c.listeInfo.liste];
+    const coutUnitaire = (e.coutUnitaire!==null && e.coutUnitaire!==undefined) ? e.coutUnitaire : (forfait>0? forfait : null);
+    return Object.assign({}, c, { entree:e, annee, anneeAuto, anneeReha, logements, coutUnitaire,
+      cout: coutUnitaire!==null? coutUnitaire*logements : null,
+      desynchronise: c.listeInfo.liste==='A' && anneeReha!==null && annee!==null && annee!==anneeReha });
+  });
+
+  function majEntree(resCode, champ, valeur){
+    setAdaptationLignes((adaptationLignes||[]).map((a)=> a.resCode===resCode? Object.assign({}, a, { [champ]: valeur }) : a));
+  }
+  function majForfait(liste, v){
+    const n = Object.assign({}, forfaits); const num = v===''? null : Math.max(0, Number(v)||0);
+    if (num===null) delete n[liste]; else n[liste] = num;
+    setAccessibiliteConfig(Object.assign({}, accessibiliteConfig||{}, { forfaits:n }));
+  }
+
+  // Séries annuelles. Le volet volumétrique fonctionne toujours ; le volet financier ne s'affiche que
+  // si un forfait a été saisi — aucun forfait par défaut n'est codé en dur, un montant invente serait
+  // repris tel quel dans un document client.
+  const parAnnee = annees.map((y)=>{
+    const duA = programme.filter((p)=>p.annee===y && p.listeInfo.liste==='A');
+    const duB = programme.filter((p)=>p.annee===y && p.listeInfo.liste==='B');
+    const obj = objectifsAdaptation[y] || {};
+    const somme = (arr, f)=>arr.reduce((s,p)=>s+(f(p)||0), 0);
+    return { annee:y,
+      planifieA: somme(duA,(p)=>p.logements), planifieB: somme(duB,(p)=>p.logements),
+      montantA: somme(duA,(p)=>p.cout), montantB: somme(duB,(p)=>p.cout),
+      objectifA: Number(obj.reha)||0, objectifB: Number(obj.diffus)||0 };
+  });
+  // Deux totaux distincts, à ne pas confondre : ce qui est RETENU (toutes résidences cochées) et ce
+  // qui est PLANIFIÉ (celles qui portent une année, seules à figurer dans les séries annuelles). Les
+  // KPI de volume affichent le retenu, conformément à leur libellé ; l'écart à l'objectif se mesure
+  // sur le planifié, puisque l'objectif est lui-même annuel.
+  const parListe = (liste)=>programme.filter((p)=>p.listeInfo.liste===liste);
+  const totalRetenu = programme.reduce((s,p)=>s+(p.logements||0), 0);
+  const totalMontant = programme.reduce((s,p)=>s+(p.cout||0), 0);
+  const totalPlanifie = parAnnee.reduce((s,a)=>s+a.planifieA+a.planifieB, 0);
+  const totalObjectif = parAnnee.reduce((s,a)=>s+a.objectifA+a.objectifB, 0);
+  const sansAnnee = programme.filter((p)=>p.annee===null || p.annee===undefined);
+  const desynchronises = programme.filter((p)=>p.desynchronise);
+  const cumul = (cle)=>{ let t=0; return parAnnee.map((a)=>{ t += cle==='planifie'? (a.planifieA+a.planifieB) : (a.objectifA+a.objectifB); return t; }); };
+  const ecartPct = parAnnee.map((a)=>{
+    const o = a.objectifA+a.objectifB, p = a.planifieA+a.planifieB;
+    return o>0? (p-o)/o*100 : null;
+  });
+
+  // §5.3 — réserve de mutation : croisement vieillissement faible × accessibilité bonne.
+  const auPlanVente = {};
+  (planVenteLignes||[]).forEach((l)=>{ if (l.retenue!==false && l.resCode!==null && l.resCode!==undefined) auPlanVente[l.resCode]=true; });
+  const mutation = candidats.filter((c)=>c.bande && c.bande.cle==='bonne' && c.tranche && c.tranche.cle==='faible');
+
+  return (
+    <React.Fragment>
+      <div className="ce-card">
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:10,marginBottom:12}}>
+          <h3 style={{fontSize:'.85rem',fontWeight:700,color:'var(--ce-vert-tres-fonce)'}}>Programmation du plan d'adaptation</h3>
+          <div style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'flex-end'}}>
+            {CANAUX_ADAPTATION.map((c)=>(
+              <div key={c.liste} style={{display:'flex',flexDirection:'column',gap:4}}>
+                <label style={{fontSize:'.64rem',fontWeight:700,color:'var(--ce-vert-fonce)',textTransform:'uppercase'}}>Forfait {c.liste} (€ / lgt)</label>
+                <input className="ce-select" type="number" min="0" step="100" style={{width:110}} placeholder="non renseigné"
+                  value={forfaits[c.liste] ?? ''} onChange={(e)=>majForfait(c.liste, e.target.value)} />
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {retenus.length===0 ? (
+          <p style={{fontSize:'.76rem',color:'#9fb3ae'}}>Retenez des résidences dans le bloc de priorisation ci-dessus pour construire le plan.</p>
+        ) : (
+          <React.Fragment>
+            <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:14}}>
+              <KpiCard label="Logements des résidences ciblées" value={fmtNum(totalRetenu)} sub={fmtNum(retenus.length)+' résidences retenues'} />
+              <KpiCard label="Dont via réhabilitation" value={fmtNum(parListe('A').reduce((s,p)=>s+(p.logements||0),0))} sub={fmtNum(parListe('A').length)+' résidences · liste A'} />
+              <KpiCard label="Dont en diffus" value={fmtNum(parListe('B').reduce((s,p)=>s+(p.logements||0),0))} sub={fmtNum(parListe('B').length)+' résidences · liste B'} />
+              <KpiCard label="Enveloppe budgétaire" value={forfaitsSaisis? fmtEur(totalMontant) : '—'} sub={forfaitsSaisis? null : 'Forfait non renseigné'} />
+              <KpiCard label="Écart cumulé à l'objectif"
+                value={totalObjectif>0? (totalPlanifie-totalObjectif>=0?'+':'')+fmtNum(totalPlanifie-totalObjectif) : '—'}
+                sub={totalObjectif>0? ((totalPlanifie-totalObjectif)/totalObjectif*100).toFixed(0)+'% · sur les '+fmtNum(totalPlanifie)+' logements datés' : 'Objectif non saisi'} />
+            </div>
+
+            <h4 style={{fontSize:'.78rem',fontWeight:700,color:'var(--ce-vert-tres-fonce)',marginBottom:8}}>Objectifs annuels, par canal</h4>
+            <SaisieObjectifsAnnuels annees={annees} canaux={CANAUX_ADAPTATION} valeurs={objectifsAdaptation}
+              setValeurs={setObjectifsAdaptation} unite="logements" />
+
+            <h4 style={{fontSize:'.78rem',fontWeight:700,color:'var(--ce-vert-tres-fonce)',margin:'16px 0 8px'}}>Résidences retenues — année, volume et coût</h4>
+            <div style={{maxHeight:320,overflowY:'auto',border:'1px solid #eef4f2',borderRadius:8}}>
+              <table className="ce-table ce-table-dense">
+                <thead><tr><th>Résidence</th><th>Liste</th><th>Année</th><th>Logements</th><th>Coût / lgt</th><th>Coût</th></tr></thead>
+                <tbody>
+                  {programme.map((p)=>(
+                    <tr key={p.r.code}>
+                      <td onClick={()=>onSelectResidence && onSelectResidence(p.r)} style={{cursor:'pointer'}}>{p.r.nom || p.r.code}</td>
+                      <td>{p.listeInfo.liste}</td>
+                      <td>
+                        <input className="ce-select" type="number" min="1900" max="2100" step="1" style={{width:78,padding:'2px 6px'}}
+                          placeholder={p.anneeAuto? String(p.anneeAuto) : '—'}
+                          title={p.desynchronise? 'Année différente de la réhabilitation ('+p.anneeReha+') : le volet adaptation ne sera plus intégré à l\'opération' : (p.anneeAuto? 'Pré-remplie par l\'année de la réhabilitation' : '')}
+                          value={p.entree.annee ?? ''} onChange={(e)=>majEntree(p.r.code,'annee', e.target.value===''? null : Number(e.target.value))} />
+                        {p.desynchronise && <span title={'Réhabilitation en '+p.anneeReha} style={{marginLeft:4,color:'#d98032',fontWeight:700,fontSize:'.66rem'}}>⚠ désync.</span>}
+                      </td>
+                      <td><input className="ce-select" type="number" min="0" step="1" style={{width:78,padding:'2px 6px'}}
+                            placeholder={String(p.r.nbLgt||0)} value={p.entree.logements ?? ''}
+                            onChange={(e)=>majEntree(p.r.code,'logements', e.target.value===''? null : Math.max(0,Number(e.target.value)))} /></td>
+                      <td><input className="ce-select" type="number" min="0" step="100" style={{width:92,padding:'2px 6px'}}
+                            placeholder={forfaits[p.listeInfo.liste]>0? String(forfaits[p.listeInfo.liste]) : 'forfait ?'}
+                            value={p.entree.coutUnitaire ?? ''}
+                            onChange={(e)=>majEntree(p.r.code,'coutUnitaire', e.target.value===''? null : Math.max(0,Number(e.target.value)))} /></td>
+                      <td>{p.cout===null? <span style={{color:'#9fb3ae'}}>non renseigné</span> : fmtEur(p.cout)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {(sansAnnee.length>0 || desynchronises.length>0) && (
+              <p style={{fontSize:'.7rem',color:'var(--ce-corail)',marginTop:8,lineHeight:1.5}}>
+                {sansAnnee.length>0 && <span>{fmtNum(sansAnnee.length)} résidence{sansAnnee.length>1?'s':''} sans année : elle{sansAnnee.length>1?'s n\'apparaissent':' n\'apparaît'} dans aucun exercice des graphiques ci-dessous. </span>}
+                {desynchronises.length>0 && <span>{fmtNum(desynchronises.length)} année{desynchronises.length>1?'s':''} d'adaptation désynchronisée{desynchronises.length>1?'s':''} de la réhabilitation correspondante.</span>}
+              </p>
+            )}
+          </React.Fragment>
+        )}
+      </div>
+
+      {retenus.length>0 && (
+        <React.Fragment>
+          <div className="ce-card">
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:10,marginBottom:12}}>
+              <h3 style={{fontSize:'.85rem',fontWeight:700,color:'var(--ce-vert-tres-fonce)'}}>Objectif et planifié, par année</h3>
+              <div style={{display:'flex',gap:6}}>
+                <button className={uniteGraphe==='logements'?'ce-btn ce-btn-sm':'ce-btn-outline ce-btn-sm'} onClick={()=>setUniteGraphe('logements')}>Logements</button>
+                <button className={uniteGraphe==='montants'?'ce-btn ce-btn-sm':'ce-btn-outline ce-btn-sm'} onClick={()=>setUniteGraphe('montants')} disabled={!forfaitsSaisis}
+                  title={forfaitsSaisis? '' : 'Saisissez un forfait par logement pour activer la vue en montants'}>Montants</button>
+              </div>
+            </div>
+            {uniteGraphe==='montants' && !forfaitsSaisis ? (
+              <p style={{fontSize:'.75rem',color:'#9fb3ae'}}>Forfait non renseigné : le volet financier reste masqué.</p>
+            ) : (
+              <ChartCanvas type="bar" height={320} plugins={CE_ECART_LABELS_PLUGINS} data={{
+                labels: annees,
+                datasets: uniteGraphe==='logements' ? [
+                  { label:'Planifié — liste A', data: parAnnee.map((a)=>a.planifieA), backgroundColor:'#009261', stack:'p' },
+                  { label:'Planifié — liste B', data: parAnnee.map((a)=>a.planifieB), backgroundColor:'#58D88B', stack:'p' },
+                  { type:'line', label:'Objectif', data: parAnnee.map((a)=>a.objectifA+a.objectifB), borderColor:'#264E46', backgroundColor:'#264E46', pointRadius:3, tension:.2 },
+                ] : [
+                  { label:'Montant — liste A', data: parAnnee.map((a)=>a.montantA), backgroundColor:'#009261', stack:'p' },
+                  { label:'Montant — liste B', data: parAnnee.map((a)=>a.montantB), backgroundColor:'#58D88B', stack:'p' },
+                ],
+              }} options={{
+                scales:{ x:{stacked:true}, y:{stacked:true, beginAtZero:true,
+                  title:{display:true,text: uniteGraphe==='logements'? 'Logements' : 'Euros'},
+                  ticks: uniteGraphe==='montants'? { callback:(v)=>fmtKEur(v) } : undefined } },
+                // Couleurs inversées par rapport aux graphiques de budget : ici dépasser l'objectif
+                // d'adaptation est une bonne nouvelle, rester en dessous ne l'est pas.
+                plugins:{ ...(uniteGraphe==='logements'? { ceEcartLabels:{ datasetIndex:0, values:ecartPct, colorPos:'#009261', colorNeg:'#FF8364' } } : {}),
+                  tooltip:{ callbacks:{ label:(ctx)=> ctx.dataset.label+' : '+(uniteGraphe==='montants'? fmtEur(ctx.raw) : fmtNum(ctx.raw)+' lgt') } } },
+              }} />
+            )}
+            <p style={{fontSize:'.7rem',color:'var(--ce-vert-fonce)',marginTop:10,lineHeight:1.5}}>
+              Barres empilées par canal, courbe d'objectif tous canaux confondus, et écart annuel en %
+              sous chaque barre. Les résidences sans année d'adaptation n'apparaissent dans aucun
+              exercice — elles sont décomptées au-dessus plutôt que réparties arbitrairement.
+            </p>
+          </div>
+
+          <div className="ce-card">
+            <h3 style={{fontSize:'.85rem',fontWeight:700,color:'var(--ce-vert-tres-fonce)',marginBottom:12}}>Trajectoire cumulée</h3>
+            <ChartCanvas type="line" height={280} data={{
+              labels: annees,
+              datasets: [
+                { label:'Planifié cumulé', data: cumul('planifie'), borderColor:'#009261', backgroundColor:'#009261', pointRadius:2, tension:.2 },
+                { label:'Objectif cumulé', data: cumul('objectif'), borderColor:'#264E46', backgroundColor:'#264E46', borderDash:[5,4], pointRadius:2, tension:.2 },
+              ]
+            }} options={{ scales:{ y:{ beginAtZero:true, title:{display:true,text:'Logements cumulés'} } } }} />
+            {totalObjectif>0 && (
+              <p style={{fontSize:'.72rem',color:'var(--ce-vert-fonce)',marginTop:10}}>
+                Delta en fin de trajectoire : <b style={{color: totalPlanifie>=totalObjectif? 'var(--ce-vert-principal)':'var(--ce-corail)'}}>
+                  {totalPlanifie-totalObjectif>=0?'+':''}{fmtNum(totalPlanifie-totalObjectif)} logements
+                </b> ({((totalPlanifie-totalObjectif)/totalObjectif*100).toFixed(0)}%).
+              </p>
+            )}
+          </div>
+        </React.Fragment>
+      )}
+
+      <div className="ce-card">
+        <h3 style={{fontSize:'.85rem',fontWeight:700,color:'var(--ce-vert-tres-fonce)',marginBottom:4}}>Réserve de mutation</h3>
+        <p style={{fontSize:'.7rem',color:'var(--ce-vert-fonce)',marginBottom:10,lineHeight:1.5}}>
+          Résidences au croisement <b>vieillissement faible × accessibilité bonne</b> : du parc adapté
+          peu occupé par des locataires âgés, donc mobilisable pour reloger ceux des résidences
+          inadaptées. Lecture à double tranchant lorsqu'une de ces résidences est au plan de vente :
+          elle peut <b>créer</b> de la mutation — on y reloge, ce qui libère du logement ailleurs et
+          alimente la rotation nécessaire à la vente — mais elle sortira du parc. Les deux faits sont
+          affichés côte à côte ; l'outil ne tranche pas à la place du consultant.
+        </p>
+        {mutation.length===0 ? <p style={{fontSize:'.75rem',color:'#9fb3ae'}}>Aucune résidence dans ce croisement.</p> : (
+          <div style={{maxHeight:260,overflowY:'auto',border:'1px solid #eef4f2',borderRadius:8}}>
+            <table className="ce-table ce-table-dense">
+              <thead><tr><th>Résidence</th><th>Commune</th><th>Lgts</th><th>Accessibilité</th><th>Plan de vente</th></tr></thead>
+              <tbody>
+                {mutation.map((c)=>(
+                  <tr key={c.r.code} onClick={()=>onSelectResidence && onSelectResidence(c.r)}>
+                    <td>{c.r.nom || c.r.code}</td>
+                    <td>{c.r.commune || '—'}</td>
+                    <td>{fmtNum(c.r.nbLgt)}</td>
+                    <td>{fmtDec(c.score,0)}</td>
+                    <td>{auPlanVente[c.r.code]
+                      ? <span title="Mobilisable pour la mutation, mais destinée à sortir du parc" style={{color:'#d98032',fontWeight:700}}>oui</span>
+                      : <span style={{color:'#9fb3ae'}}>non</span>}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </React.Fragment>
+  );
+}
+function ViewAccessibilite({residences, operations, includeIdentifiees, planVenteLignes, adaptationLignes, setAdaptationLignes, objectifsAdaptation, setObjectifsAdaptation, accessibiliteConfig, setAccessibiliteConfig, echelles, onSelectResidence}){
   const poids = (accessibiliteConfig && accessibiliteConfig.poids) || ACCESSIBILITE_POIDS_DEFAUT;
   const bandes = (accessibiliteConfig && accessibiliteConfig.bandes) || ACCESS_BANDS_DEFAUT;
   const [unite, setUnite] = useState('logements');   // 'logements' | 'residences'
@@ -7028,6 +7295,33 @@ function ViewAccessibilite({residences, operations, includeIdentifiees, planVent
     return { r, score:s.score, couverture:s.couverture, manquants:s.manquants,
       bande: bandeAccessibilite(s.score, bandes), tranche: trancheVieillissement(r.vieillissement) };
   }), [residences, poids, bandes]);
+
+  // §4 et §5 partagent le même classement : calculé une fois ici, jamais deux fois — deux calculs
+  // indépendants finiraient par diverger dès qu'un critère ou une pondération change.
+  const configPriorite = (accessibiliteConfig && accessibiliteConfig.priorite) || PRIORITE_ADAPTATION_DEFAUT;
+  const ctxPriorite = useMemo(()=>{
+    const opsParRes = {};
+    (operations||[]).forEach((o)=>{
+      if (!includeIdentifiees && o.statut==='identifie') return;
+      (opsParRes[o.resCode] = opsParRes[o.resCode] || []).push(o);
+    });
+    const auPlanVente = {};
+    (planVenteLignes||[]).forEach((l)=>{ if (l.retenue!==false && l.resCode!==null && l.resCode!==undefined) auPlanVente[l.resCode] = true; });
+    return { opsParRes, auPlanVente };
+  }, [operations, includeIdentifiees, planVenteLignes]);
+  const retenues = useMemo(()=>{
+    const m = {}; (adaptationLignes||[]).forEach((a)=>{ m[a.resCode] = a; }); return m;
+  }, [adaptationLignes]);
+  const candidats = useMemo(()=>lignes.map((l)=>{
+    const p = scorePrioriteAdaptation(l, configPriorite, ctxPriorite);
+    const retenue = retenues[l.r.code] || null;
+    const aff = listeAdaptation(p.criteres, retenue? retenue.listeForcee : null);
+    return Object.assign({}, l, { priorite:p, retenue:!!retenue, listeInfo:aff,
+      alertes: alertesAdaptation(l, p.criteres, !!retenue) });
+  }).sort((a,b)=>{
+    if (a.priorite.exclu !== b.priorite.exclu) return a.priorite.exclu? 1 : -1;
+    return (b.priorite.score??-1) - (a.priorite.score??-1);
+  }), [lignes, configPriorite, ctxPriorite, retenues]);
 
   const criteresPresents = CRITERES_ACCESSIBILITE.filter((c)=>residences.some((r)=>r[c.cle]!==null && r[c.cle]!==undefined));
   const sansVieillissement = lignes.every((l)=>l.tranche===null);
@@ -7285,9 +7579,16 @@ function ViewAccessibilite({residences, operations, includeIdentifiees, planVent
       )}
 
       {/* ------- Priorisation et deux listes (§4) ------- */}
-      <AccessibilitePriorisation lignes={lignes} operations={operations} includeIdentifiees={includeIdentifiees}
-        planVenteLignes={planVenteLignes} accessibiliteConfig={accessibiliteConfig} setAccessibiliteConfig={setAccessibiliteConfig}
-        adaptationLignes={adaptationLignes} setAdaptationLignes={setAdaptationLignes} unite={unite} onSelectResidence={onSelectResidence} />
+      <AccessibilitePriorisation candidats={candidats} retenues={retenues} config={configPriorite}
+        accessibiliteConfig={accessibiliteConfig} setAccessibiliteConfig={setAccessibiliteConfig}
+        adaptationLignes={adaptationLignes} setAdaptationLignes={setAdaptationLignes} onSelectResidence={onSelectResidence} />
+
+      {/* ------- Programmation du plan d'adaptation (§5) ------- */}
+      <AccessibiliteProgrammation candidats={candidats} retenues={retenues} operations={operations}
+        accessibiliteConfig={accessibiliteConfig} setAccessibiliteConfig={setAccessibiliteConfig}
+        adaptationLignes={adaptationLignes} setAdaptationLignes={setAdaptationLignes}
+        objectifsAdaptation={objectifsAdaptation} setObjectifsAdaptation={setObjectifsAdaptation}
+        planVenteLignes={planVenteLignes} onSelectResidence={onSelectResidence} />
 
       {/* ------- Table ------- */}
       <div className="ce-card">
@@ -7661,6 +7962,8 @@ function App({currentUser, onLogout}){
             planVenteLignes={planVenteLignes.filter((v)=>v.resCode===null || filteredCodes.has(v.resCode))}
             adaptationLignes={adaptationLignes}
             setAdaptationLignes={setAdaptationLignes}
+            objectifsAdaptation={objectifsAdaptation}
+            setObjectifsAdaptation={setObjectifsAdaptation}
             accessibiliteConfig={accessibiliteConfig}
             setAccessibiliteConfig={setAccessibiliteConfig}
             echelles={data.accessibiliteEchelles || {}}
