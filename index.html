@@ -74,6 +74,10 @@ html,body{margin:0;padding:0;background:var(--ce-vert-tres-clair);font-family:va
 .ce-nav-dropdown-item{padding:8px 16px;border-radius:6px;font-size:.82rem;font-weight:600;cursor:pointer;color:var(--ce-vert-fonce);white-space:nowrap;}
 .ce-nav-dropdown-item:hover{background:#f5f8f7;}
 .ce-nav-dropdown-item.active{color:var(--ce-vert-principal);background:var(--ce-vert-tres-clair);}
+/* V9 §1.4 — pendant de .ce-tab.disabled pour les sous-onglets d'une section : seule la variante de
+   niveau 1 existait, un sous-onglet désactivé était donc rendu comme un sous-onglet normal. */
+.ce-nav-dropdown-item.disabled{color:#b7c9c4;cursor:not-allowed;}
+.ce-nav-dropdown-item.disabled:hover{background:transparent;}
 
 .ce-input, .ce-select{border:1.5px solid #dfeae6;border-radius:6px;padding:6px 10px;font-family:var(--ce-font);font-size:.8rem;background:#fff;color:var(--ce-vert-tres-fonce);}
 .ce-input:focus, .ce-select:focus{outline:none;border-color:var(--ce-vert-principal);}
@@ -196,6 +200,155 @@ function findSheet(sheetNames, pattern){ return sheetNames.find((n)=>pattern.tes
      conventionnalité issue de "dont conventionné", et absente d'un des deux fichiers de référence).
    - "Moyenne - Performance Carbonne" : présente uniquement dans STANDARD, absente d'Aubervilliers —
      réservée à la Tâche B (fiche résidence), non utilisée en Tâche A. */
+/* ---- Accessibilité & adaptabilité (V9 §1) ----
+   Les sous-critères de cotation qui portent le sujet sont détectés par des index DÉDIÉS, en plus de
+   critereGroupCols : ce dernier n'expose un groupe que s'il atteint 3 colonnes (cf. `cols.length>=3`
+   plus bas), si bien qu'un fichier partiellement rempli ferait disparaître d'un coup tout un groupe
+   et avec lui des critères pourtant présents.
+
+   Les libellés varient d'un gabarit à l'autre — vérifié le 2026-09-14 sur le gabarit standard v2 et
+   sur un fichier client bâti sur un modèle antérieur. D'où plusieurs motifs par critère, du plus
+   spécifique au plus large. Le fichier client nomme « Accessibilité » ce que le gabarit actuel appelle
+   « Accessibilité / Adaptabilité PMR », et « Qualité de la localisation et de desserte du quartier »
+   ce que le gabarit appelle « Accessibilité et desserte du quartier ». Il porte en revanche un
+   sous-critère « Ascenseurs » que le gabarit actuel n'a pas : c'est le signal le plus direct qui
+   existe sur l'accessibilité réelle, il entre donc au score quand il est présent. */
+const CRITERES_ACCESSIBILITE = [
+  { cle:'accessibilitePMR', label:"Accessibilité / Adaptabilité PMR", poids:3,
+    motifs:[/^accessibilite \/ adaptabilite pmr$/, /^accessibilite \/ adaptabilite/, /^accessibilite$/] },
+  { cle:'equipementsTechniques', label:"Équipements techniques collectifs", poids:2,
+    motifs:[/^les equipements techniques collectifs$/, /^equipements techniques collectifs$/] },
+  { cle:'ascenseurs', label:"Ascenseurs", poids:2,
+    motifs:[/^ascenseurs?$/] },
+  // Les deux « parties communes » ne sont pas détectées par motif : cf. resoudrePartiesCommunes().
+  { cle:'partiesCommunesAttr', label:"Parties communes — conception", poids:1, motifs:[] },
+  { cle:'partiesCommunesTech', label:"Parties communes — vétusté", poids:1, motifs:[] },
+  { cle:'dessertQuartier', label:"Accessibilité et desserte du quartier", poids:1,
+    motifs:[/^accessibilite et desserte du quartier$/, /desserte du quartier$/] },
+  { cle:'commercesProximite', label:"Équipements commerciaux et services de proximité", poids:1,
+    motifs:[/^equipements commerciaux et service de proximite/] },
+];
+const ACCESSIBILITE_POIDS_DEFAUT = CRITERES_ACCESSIBILITE.reduce((acc,c)=>{ acc[c.cle]=c.poids; return acc; }, {});
+
+/* Le piège des deux « parties communes » ne se présente pas partout de la même façon. Sur le gabarit
+   standard, « Les parties communes » (attractivité) et « Parties communes » (technique, avec un espace
+   final que ceNorm absorbe) restent distinguables par deux motifs ancrés différemment. Sur le fichier
+   client, les DEUX colonnes s'appellent « Parties communes » : après normalisation elles sont
+   identiques, et un findColIndex renverrait la même colonne pour les deux critères — le critère
+   technique serait alors compté deux fois avec la valeur d'attractivité.
+   On tranche donc par position relative au bloc technique, repéré par son en-tête de moyenne
+   (« Moyenne - Technique »), qui existe dans tous les gabarits observés et que le parseur détecte déjà
+   pour la note d'état technique. Même principe d'ancrage que parseGainsDPE avec « Energie »/« Ges ». */
+function resoudrePartiesCommunes(header, ancreTechnique){
+  const toutes = findAllColIndices(header, /^(les )?parties communes$/);
+  if (!toutes.length) return { partiesCommunesAttr:-1, partiesCommunesTech:-1 };
+  if (ancreTechnique>=0){
+    const avant = toutes.filter((c)=>c<ancreTechnique);
+    const apres = toutes.filter((c)=>c>=ancreTechnique);
+    return {
+      partiesCommunesAttr: avant.length? avant[0] : -1,
+      partiesCommunesTech: apres.length? apres[0] : -1,
+    };
+  }
+  // Sans ancre, on retombe sur l'ordre des blocs de cotation, invariant dans tous les gabarits vus :
+  // attractivité avant technique.
+  return { partiesCommunesAttr: toutes[0], partiesCommunesTech: toutes.length>1? toutes[1] : -1 };
+}
+
+/* §9.3 — l'échelle des cotations se vérifie, elle ne se présume pas : 0/33/66/100 dans les gabarits
+   observés, mais certains bailleurs cotent sur 0-3 ou 0-10, et les colonnes d'occupation sociale
+   (dont « Vieillissement ») sont stockées en fraction 0-1. On détecte l'échelle colonne par colonne
+   sur l'ensemble du parc — impossible ligne par ligne — puis on ramène tout sur 0-100 À LA LECTURE,
+   pour que le score composite et les bornes de bandes soient toujours exprimés dans la même unité.
+   L'échelle retenue est remontée à l'interface, qui la signale. */
+function echelleCotation(valeurs){
+  const nn = valeurs.filter((v)=>v!==null && v!==undefined && !isNaN(v));
+  if (!nn.length) return null;
+  const max = Math.max.apply(null, nn);
+  if (max<=1)  return { libelle:'0-1',   facteur:100 };
+  if (max<=3)  return { libelle:'0-3',   facteur:100/3 };
+  if (max<=10) return { libelle:'0-10',  facteur:10 };
+  return { libelle:'0-100', facteur:1 };
+}
+// Champs ramenés sur 0-100 : les critères du score, plus les deux colonnes de contexte qui servent
+// d'axes de lecture. « Vieillissement » suit la même règle que le groupe social (fraction 0-1 dans
+// les gabarits), mais la conversion est écrite ici explicitement plutôt que reprise de
+// critereGroups.social, dont elle est indépendante.
+const LIBELLES_CONTEXTE_ACCESSIBILITE = { vieillissement:'Vieillissement', vulnerabiliteResidents:'Vulnérabilité des résidents' };
+const CHAMPS_ECHELLE_ACCESSIBILITE = CRITERES_ACCESSIBILITE.map((c)=>c.cle).concat(Object.keys(LIBELLES_CONTEXTE_ACCESSIBILITE));
+function libelleChampAccessibilite(cle){
+  const c = CRITERES_ACCESSIBILITE.find((x)=>x.cle===cle);
+  return c ? c.label : (LIBELLES_CONTEXTE_ACCESSIBILITE[cle] || cle);
+}
+function normaliseEchellesAccessibilite(residences){
+  const echelles = {};
+  CHAMPS_ECHELLE_ACCESSIBILITE.forEach((cle)=>{
+    const ech = echelleCotation(residences.map((r)=>r[cle]));
+    if (!ech) return;
+    echelles[cle] = ech;
+    if (ech.facteur===1) return;
+    residences.forEach((r)=>{ if (r[cle]!==null && r[cle]!==undefined) r[cle] = r[cle]*ech.facteur; });
+  });
+  return echelles;
+}
+
+/* Sens de « Vieillissement » — tranché le 2026-09-14 par le barème du classeur, validé par Jules.
+   « 0. Critères de cotation » L61 définit la colonne comme le TAUX DE LOCATAIRES DE PLUS DE 65 ANS.
+   « 0. Paramétrage critères » L22-25 en donne quatre tranches rangées 1 à 4, « >30 % » en rang 1 et
+   « <5 % » en rang 4. La convention rang → note du classeur, vérifiée sur des critères au sens non
+   ambigu (« 0. Paramétrage cotation » L78-86, taux de vacance et de rotation), attribue 100 à la
+   tranche FAVORABLE et 0 à la défavorable.
+   Donc : 0 = plus de 30 % de locataires âgés = VIEILLISSEMENT FORT ; 100 = moins de 5 % = faible.
+   C'est une note de cotation ordinaire, pas un indice de fragilité — l'axe de la matrice de ciblage
+   se lit dans ce sens-là. Ne pas se fier à la corrélation avec « Ressources < 60 % du plafond PLUS »
+   (r = 0,92 sur le gabarit) : cette colonne est elle-même une cotation soumise à la même convention
+   inversée, la corrélation prouve seulement qu'elles la partagent, pas laquelle des deux lectures
+   est la bonne. */
+const TRANCHES_VIEILLISSEMENT = [
+  { cle:'fort',   court:'Vieillissement fort',   label:'Plus de 30 % de locataires de plus de 65 ans', max:16.5 },
+  { cle:'moyen',  court:'Vieillissement moyen',  label:'Entre 15 % et 30 %',                           max:49.5 },
+  { cle:'faible', court:'Vieillissement faible', label:'Moins de 15 %',                                max:Infinity },
+];
+function trancheVieillissement(v){
+  if (v===null || v===undefined || isNaN(v)) return null;
+  return TRANCHES_VIEILLISSEMENT.find((t)=>v<t.max) || TRANCHES_VIEILLISSEMENT[TRANCHES_VIEILLISSEMENT.length-1];
+}
+
+/* Bandes d'accessibilité à SEUILS ABSOLUS (§3.1). classifierForCriterion, utilisé par la segmentation,
+   ramène chaque critère en pourcentage de son maximum OBSERVÉ : pertinent pour une note d'échelle
+   inconnue, faux ici. Les cotations d'accessibilité sont sur une échelle absolue connue une fois
+   normalisées ; si aucune résidence du parc filtré n'atteint 100, un parc médiocre se retrouverait
+   étalé sur les trois bandes, « bonne » comprise. */
+const ACCESS_BANDS_DEFAUT = [
+  { cle:'bonne',   label:'Accessibilité bonne',   min:66 },
+  { cle:'moyenne', label:'Accessibilité moyenne', min:40 },
+  { cle:'faible',  label:'Accessibilité faible',  min:0  },
+];
+function bandeAccessibilite(score, bandes){
+  if (score===null || score===undefined || isNaN(score)) return null;
+  const b = (bandes && bandes.length? bandes : ACCESS_BANDS_DEFAUT).slice().sort((x,y)=>y.min-x.min);
+  return b.find((x)=>score>=x.min) || b[b.length-1];
+}
+
+/* Score composite (§1.2). Un critère absent est RETIRÉ DU DÉNOMINATEUR, jamais compté zéro : une
+   résidence mal renseignée ne doit pas se retrouver artificiellement en bas de classement (même règle
+   que le score de potentiel de vente, V8 §3.1). `couverture` est la part du poids total effectivement
+   couverte — c'est elle qui déclenche le marquage « score partiel » dans l'interface. */
+function scoreAccessibilite(r, poids){
+  const p = poids || ACCESSIBILITE_POIDS_DEFAUT;
+  const total = Object.keys(p).reduce((s,k)=>s+(p[k]||0), 0);
+  let num = 0, den = 0;
+  const manquants = [], presents = [];
+  Object.keys(p).forEach((k)=>{
+    if (!p[k]) return;
+    const v = r? r[k] : null;
+    if (v===null || v===undefined || isNaN(v)){ manquants.push(k); return; }
+    num += p[k]*v; den += p[k]; presents.push(k);
+  });
+  if (den===0) return { score:null, manquants, presents, couverture:0 };
+  return { score:num/den, manquants, presents, couverture: total>0? den/total : 0 };
+}
+
 const RE_CODE_RESIDENCE = /^code de (residence|batiment)$/;
 function parseBaseCotation(matrix){
   // La colonne d'identifiant s'appelle « Code de Résidence » dans le gabarit Cellance actuel, mais
@@ -236,6 +389,8 @@ function parseBaseCotation(matrix){
     // pour déduire le facteur d'émission de départ (entrée JY). La colonne « kg CO₂e / m² » existe aussi
     // dans le gabarit mais n'est PAS reprise : l'Excel ne s'en sert nulle part dans la trajectoire, qui
     // recalcule les émissions en kWh/m² × facteur d'émission (cf. computeDecarbonation).
+    vieillissement: findColIndex(header,[/^vieillissement$/]),
+    vulnerabiliteResidents: findColIndex(header,[/^vulnerabilite des residents$/]),
     kwhM2: findColIndex(header,[/^kwh ?\/ ?m.?$/]),
     // Motif non ancré en fin : l'en-tête du gabarit porte un retour à la ligne et sa légende
     // (« Type chauffage ⏎ Individuel/Collectif »), que ceNorm ramène à un espace.
@@ -300,6 +455,12 @@ function parseBaseCotation(matrix){
   });
 
   idx.performanceCarbone = findColIndex(header,[/^moyenne.*performance carbon/]);
+
+  // V9 §1.1 — index dédiés des sous-critères d'accessibilité (cf. CRITERES_ACCESSIBILITE).
+  const pc = resoudrePartiesCommunes(header, idx.technique);
+  CRITERES_ACCESSIBILITE.forEach((c)=>{
+    idx[c.cle] = c.motifs.length ? findColIndex(header, c.motifs) : (pc[c.cle]!==undefined? pc[c.cle] : -1);
+  });
 
   // Sous-critères de cotation détaillés (Tâche B — fiche résidence, radars/graphiques). Colonnes
   // vérifiées le 2026-07-10 sur Base patrimoniale_PSP STANDARD v2.xlsx (gabarit complet) : présentes
@@ -423,6 +584,8 @@ function parseBaseCotation(matrix){
       typeBati: idx.typeBati>=0? row[idx.typeBati]:null,
       modeChauffage: idx.modeChauffage>=0? row[idx.modeChauffage]:null,
       modeECS: idx.modeECS>=0? row[idx.modeECS]:null,
+      vieillissement: idx.vieillissement>=0? ceNum(row[idx.vieillissement]):null,
+      vulnerabiliteResidents: idx.vulnerabiliteResidents>=0? ceNum(row[idx.vulnerabiliteResidents]):null,
       kwhM2: idx.kwhM2>=0? ceNum(row[idx.kwhM2]):null,
       typeChauffage: idx.typeChauffage>=0? row[idx.typeChauffage]:null,
       dontConventionne: idx.dontConventionne>=0? ceNum(row[idx.dontConventionne]):null,
@@ -447,6 +610,9 @@ function parseBaseCotation(matrix){
       notes: {},
       critereGroups: {},
     };
+    // V9 §1.1 — exposés en champs de premier niveau (r.accessibilitePMR, …), encore sur leur échelle
+    // native : la remise sur 0-100 a lieu une fois toutes les lignes lues (cf. normaliseEchellesAccessibilite).
+    CRITERES_ACCESSIBILITE.forEach((c)=>{ res[c.cle] = idx[c.cle]>=0? ceNum(row[idx[c.cle]]) : null; });
     Object.keys(critereGroupCols).forEach((key)=>{
       const g = critereGroupCols[key];
       const vals = g.cols.map((gc)=>{
@@ -528,7 +694,11 @@ function parseBaseCotation(matrix){
       }
     });
   });
-  return { headerRowIdx, idx, typoCols, distRuns, opBlocks, residences: dedupedResidences, operations, duplicateCodes, nbCols: header.length };
+  // V9 §9.3 — remise sur 0-100 des cotations d'accessibilité et des deux colonnes de contexte, une
+  // fois toutes les lignes lues (l'échelle se déduit du parc, pas d'une ligne). `accessibiliteEchelles`
+  // remonte à l'interface l'échelle détectée pour chaque champ, qui la signale quand ce n'est pas 0-100.
+  const accessibiliteEchelles = normaliseEchellesAccessibilite(dedupedResidences);
+  return { headerRowIdx, idx, typoCols, distRuns, opBlocks, residences: dedupedResidences, operations, duplicateCodes, accessibiliteEchelles, nbCols: header.length };
 }
 
 // Cherche, dans la fenêtre [start,end) de l'en-tête, les colonnes A..G par leur nom normalisé
@@ -1620,7 +1790,7 @@ function planVenteToLegacyVentes(lignes){
     origine: l.origine || 'ajout',
   }));
 }
-function buildSaveRecord({id, nom, nomFichierSource, gabaritComplet, nbCols, data, simOperations, budgetLignes, offreNouvelleLgt, ventesSimulees, planVenteLignes, objectifsVente, ventesRealisees, criteresVenteConfig, includeIdentifiees, financeSeuils, customPivotViews, estBase, dateCreation}){
+function buildSaveRecord({id, nom, nomFichierSource, gabaritComplet, nbCols, data, simOperations, budgetLignes, offreNouvelleLgt, ventesSimulees, planVenteLignes, objectifsVente, ventesRealisees, criteresVenteConfig, includeIdentifiees, financeSeuils, customPivotViews, accessibiliteConfig, adaptationLignes, objectifsAdaptation, enrichissementAccess, estBase, dateCreation}){
   const now = new Date().toISOString();
   return {
     id: id || genSaveId(),
@@ -1647,6 +1817,13 @@ function buildSaveRecord({id, nom, nomFichierSource, gabaritComplet, nbCols, dat
     objectifsVente: objectifsVente || {},
     ventesRealisees: ventesRealisees || {},
     criteresVenteConfig: criteresVenteConfig || null,
+    // §V9 Phase 1.3 — ajoutés APRÈS les champs existants, sans toucher à l'ordre de sérialisation en
+    // place : une sauvegarde V9 reste relisible par une version antérieure de l'outil, qui ignore
+    // simplement ces clés. Aucune migration en lecture n'est nécessaire, ces données sont nouvelles.
+    accessibiliteConfig: accessibiliteConfig || null,
+    adaptationLignes: adaptationLignes || [],
+    objectifsAdaptation: objectifsAdaptation || {},
+    enrichissementAccess: enrichissementAccess || {},
   };
 }
 function isValidSaveRecord(obj){
@@ -1879,6 +2056,8 @@ function ImportScreen({onLoaded, onRestore, onBaseChanged, currentUser, onLogout
           planVenteLignes: migratePlanVente(obj), objectifsVente: obj.objectifsVente||{},
           ventesRealisees: obj.ventesRealisees||{}, criteresVenteConfig: obj.criteresVenteConfig||null,
           includeIdentifiees: obj.includeIdentifiees!==undefined? obj.includeIdentifiees : true,
+          accessibiliteConfig: obj.accessibiliteConfig||null, adaptationLignes: obj.adaptationLignes||[],
+          objectifsAdaptation: obj.objectifsAdaptation||{}, enrichissementAccess: obj.enrichissementAccess||{},
           estBase: false,
         });
         await idbPut(record); await refreshSaves();
@@ -1914,6 +2093,7 @@ function ImportScreen({onLoaded, onRestore, onBaseChanged, currentUser, onLogout
       "      residences: cotation.residences, operations: cotation.operations,",
       "      gainsGrid: gainsGrid || {}, hasGainsGrid: !!gainsSheetName,",
       "      duplicateCodes: cotation.duplicateCodes || [],",
+      "      accessibiliteEchelles: cotation.accessibiliteEchelles || {},",
       "      cessionsEcheancier: cessions, hasCessions: !!cessionsSheetName,",
       "      cessionsParResCode: cessionsMatch.parResCode,",
       "      cessionsOrphelines: cessionsMatch.orphelines.length,",
@@ -1960,6 +2140,7 @@ function ImportScreen({onLoaded, onRestore, onBaseChanged, currentUser, onLogout
         residences: cotation.residences, operations: cotation.operations,
         gainsGrid: gainsGrid || {}, hasGainsGrid: !!gainsSheetName,
         duplicateCodes: cotation.duplicateCodes || [],
+        accessibiliteEchelles: cotation.accessibiliteEchelles || {},
         cessionsEcheancier: cessions, hasCessions: !!cessionsSheetName,
         cessionsParResCode: cessionsMatch.parResCode,
         cessionsOrphelines: cessionsMatch.orphelines.length,
@@ -2291,18 +2472,29 @@ const NAV_ITEMS = [
     {id:'dpe', label:'Trajectoire de décarbonation'},
     {id:'offre', label:'Offre nouvelle'},
     {id:'vente', label:'Vente'},
+    {id:'accessibilite', label:'Accessibilité & adaptabilité'},
   ]},
   {id:'finance', label:'Données financières'},
   {id:'pivot', label:'Analyse libre (pivot)'},
   {id:'carto', label:'Cartographie'},
 ];
-function Nav({active, setActive, hasFinance, hasCarto, hasCompare, hasAdmin}){
+// V9 §1.4 — motif de désactivation par onglet, affiché en `title` aussi bien au niveau 1 que sur les
+// sous-onglets d'une section. Centralisé ici plutôt que dans le rendu : les deux niveaux doivent dire
+// la même chose, et un onglet désactivé sans explication est indiscernable d'un bug.
+const NAV_DISABLED_TITRES = {
+  carto: "Nécessite une colonne adresse dans le fichier importé",
+  finance: "Nécessite les colonnes financières (CRD, VNC, autofinancement) dans le fichier importé",
+  accessibilite: "Nécessite les sous-critères d'accessibilité de la cotation (Accessibilité / Adaptabilité PMR) dans le fichier importé",
+};
+function Nav({active, setActive, hasFinance, hasCarto, hasCompare, hasAdmin, hasAccessibilite}){
   const [openSection, setOpenSection] = useState(null);
-  const items = NAV_ITEMS.map((it)=>{
+  const marque = (it)=>{
     if (it.id==='finance') return Object.assign({}, it, {disabled: !hasFinance});
     if (it.id==='carto') return Object.assign({}, it, {disabled: !hasCarto});
+    if (it.id==='accessibilite') return Object.assign({}, it, {disabled: !hasAccessibilite});
     return it;
-  });
+  };
+  const items = NAV_ITEMS.map((it)=> it.tabs ? Object.assign({}, it, {tabs: it.tabs.map(marque)}) : marque(it));
   if (hasCompare) items.push({id:'compare', label:'Comparatif'});
   if (hasAdmin) items.push({id:'admin', label:'Administration'});
 
@@ -2334,8 +2526,9 @@ function Nav({active, setActive, hasFinance, hasCarto, hasCompare, hasAdmin}){
                   <div style={{position:'absolute',top:'100%',left:0,marginTop:2,background:'#fff',border:'1px solid #eef4f2',borderRadius:8,boxShadow:'0 8px 24px rgba(0,0,0,.12)',zIndex:10,minWidth:240,padding:6}}>
                     {it.tabs.map((t)=>(
                       <div key={t.id}
-                        className={"ce-nav-dropdown-item"+(active===t.id?" active":"")}
-                        onClick={()=>{ setActive(t.id); setOpenSection(null); }}
+                        className={"ce-nav-dropdown-item"+(active===t.id?" active":"")+(t.disabled?" disabled":"")}
+                        title={t.disabled? (NAV_DISABLED_TITRES[t.id] || "Non disponible dans ce fichier") : ""}
+                        onClick={()=>{ if (t.disabled) return; setActive(t.id); setOpenSection(null); }}
                       >{t.label}</div>
                     ))}
                   </div>
@@ -2347,7 +2540,7 @@ function Nav({active, setActive, hasFinance, hasCarto, hasCompare, hasAdmin}){
         return (
           <div key={it.id}
             className={"ce-tab"+(active===it.id?" active":"")+(it.disabled?" disabled":"")}
-            title={it.disabled? (it.id==='carto' ? "Nécessite une colonne adresse dans le fichier importé" : "Non disponible dans ce fichier"):""}
+            title={it.disabled? (NAV_DISABLED_TITRES[it.id] || "Non disponible dans ce fichier"):""}
             onClick={()=>{ if(!it.disabled){ setActive(it.id); setOpenSection(null); } }}
           >{it.label}</div>
         );
@@ -6341,6 +6534,55 @@ function ResidenceDrawer({residence, operations, residences, onClose, gainsGrid,
   );
 }
 
+/* ---------------- Accessibilité & adaptabilité (V9) ----------------
+   Phase 1 livre le socle : détection des colonnes, score composite, bandes, tranches de
+   vieillissement, navigation et états persistés. La vue elle-même est délibérément réduite à son
+   bandeau de conformité tant que le Checkpoint 1 n'est pas validé — les blocs de diagnostic, la
+   matrice de ciblage et le plan d'adaptation arrivent aux phases 2 à 5. */
+function ViewAccessibilite({residences, accessibiliteConfig, echelles}){
+  const poids = (accessibiliteConfig && accessibiliteConfig.poids) || ACCESSIBILITE_POIDS_DEFAUT;
+  const scores = residences.map((r)=>scoreAccessibilite(r, poids));
+  const cotees = scores.filter((s)=>s.score!==null).length;
+  const partiels = scores.filter((s)=>s.score!==null && s.couverture<0.5).length;
+  const criteresPresents = CRITERES_ACCESSIBILITE.filter((c)=>residences.some((r)=>r[c.cle]!==null && r[c.cle]!==undefined));
+  const sansVieillissement = residences.every((r)=>r.vieillissement===null || r.vieillissement===undefined);
+  // §9.3 — une échelle de cotation autre que 0-100 a été ramenée à 100 à la lecture : on ne le fait
+  // jamais en silence, un score calculé sur une échelle redressée doit être identifiable comme tel.
+  const echellesRedressees = Object.keys(echelles||{}).filter((k)=>(echelles[k]||{}).facteur!==1);
+
+  return (
+    <div style={{padding:24,display:'flex',flexDirection:'column',gap:20}}>
+      <div className="ce-card">
+        <h2 style={{fontSize:'.95rem',color:'var(--ce-vert-tres-fonce)',fontWeight:700,marginBottom:10}}>Accessibilité & adaptabilité — socle de lecture</h2>
+        <p style={{fontSize:'.78rem',color:'var(--ce-vert-fonce)',lineHeight:1.6}}>
+          {fmtNum(cotees)} résidence{cotees>1?'s':''} sur {fmtNum(residences.length)} disposent d'un score
+          d'accessibilité, calculé sur {criteresPresents.length} sous-critère{criteresPresents.length>1?'s':''} de
+          cotation présent{criteresPresents.length>1?'s':''} dans ce fichier :{' '}
+          {criteresPresents.map((c)=>c.label).join(' · ')}.
+          {partiels>0 && <span> {fmtNum(partiels)} résidence{partiels>1?'s':''} en score partiel (moins de la moitié du poids des critères couverte).</span>}
+        </p>
+        <p style={{fontSize:'.7rem',color:'var(--ce-vert-fonce)',marginTop:10,lineHeight:1.5}}>
+          Un critère absent est retiré du dénominateur du score, jamais compté zéro : une résidence mal
+          renseignée ne se retrouve pas artificiellement en bas de classement. La granularité disponible
+          est la résidence — le fichier ne porte aucun décompte de logements réellement adaptés.
+        </p>
+        {echellesRedressees.length>0 && (
+          <p style={{fontSize:'.7rem',color:'var(--ce-vert-fonce)',marginTop:8,lineHeight:1.5}}>
+            <b>Échelles redressées</b> — {echellesRedressees.map((k)=>libelleChampAccessibilite(k)+' ('+echelles[k].libelle+')').join(' · ')} : ramenées sur 0-100 à la lecture.
+          </p>
+        )}
+        {sansVieillissement && (
+          <div className="ce-card" style={{background:'var(--ce-saumon)',marginTop:12}}>
+            La colonne « Vieillissement » est absente de ce fichier : la matrice de ciblage
+            Accessibilité × Vieillissement et le bonus de priorité correspondant ne seront pas
+            disponibles. Le diagnostic d'accessibilité et le plan d'adaptation, eux, restent calculables.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 /* ---------------- App racine ---------------- */
 function App({currentUser, onLogout}){
   const [data, setData] = useState(null);
@@ -6362,6 +6604,13 @@ function App({currentUser, onLogout}){
   const [objectifsVente, setObjectifsVenteRaw] = useState({});   // { 2026: {logements, produit} }
   const [ventesRealisees, setVentesRealiseesRaw] = useState({}); // idem, années ≤ coupure Actuel
   const [criteresVenteConfig, setCriteresVenteConfigRaw] = useState(null); // null = défaut Cellance
+  // §V9 Phase 1.3 — accessibilité & adaptabilité. Données entièrement nouvelles : aucune migration
+  // n'est requise, une sauvegarde antérieure se recharge sur les valeurs par défaut et ne doit
+  // produire aucun avertissement (cf. checklist §10).
+  const [accessibiliteConfig, setAccessibiliteConfigRaw] = useState(null);      // {poids, bandes} ; null = défaut
+  const [adaptationLignes, setAdaptationLignesRaw] = useState([]);              // résidences retenues au plan d'adaptation
+  const [objectifsAdaptation, setObjectifsAdaptationRaw] = useState({});        // { 2027: {reha, diffus} }
+  const [enrichissementAccess, setEnrichissementAccessRaw] = useState({});      // { resCode: {ascenseur, niveaux, …} }
   const [includeIdentifiees, setIncludeIdentifiees] = useState(true);
   const [dirty, setDirty] = useState(false);
   const [filters, setFilters] = useState({commune:'',secteur:'',famille:'',dpe:'',qpv:''});
@@ -6416,6 +6665,10 @@ function App({currentUser, onLogout}){
     setCriteresVenteConfigRaw(null);
     setFinanceSeuilsRaw({});
     setCustomPivotViewsRaw([]);
+    setAccessibiliteConfigRaw(null);
+    setAdaptationLignesRaw([]);
+    setObjectifsAdaptationRaw({});
+    setEnrichissementAccessRaw({});
     setDirty(false);
     setActiveTab('ensemble');
     setSelectedResidence(null);
@@ -6453,6 +6706,12 @@ function App({currentUser, onLogout}){
     setCriteresVenteConfigRaw(rec.criteresVenteConfig || null);
     setFinanceSeuilsRaw(rec.financeSeuils || {});
     setCustomPivotViewsRaw(rec.customPivotViews || []);
+    // §V9 Phase 1.3 — champs entierement nouveaux : une sauvegarde anterieure retombe sur les valeurs
+    // par defaut, sans avertissement (cf. checklist §10).
+    setAccessibiliteConfigRaw(rec.accessibiliteConfig || null);
+    setAdaptationLignesRaw(rec.adaptationLignes || []);
+    setObjectifsAdaptationRaw(rec.objectifsAdaptation || {});
+    setEnrichissementAccessRaw(rec.enrichissementAccess || {});
     setIncludeIdentifiees(rec.includeIdentifiees!==undefined? rec.includeIdentifiees : true);
     setDirty(false);
     setActiveTab('ensemble');
@@ -6477,9 +6736,13 @@ function App({currentUser, onLogout}){
   function setCriteresVenteConfig(next){ setCriteresVenteConfigRaw(next); setDirty(true); }
   function setFinanceSeuils(next){ setFinanceSeuilsRaw(next); setDirty(true); }
   function setCustomPivotViews(next){ setCustomPivotViewsRaw(next); setDirty(true); }
+  function setAccessibiliteConfig(next){ setAccessibiliteConfigRaw(next); setDirty(true); }
+  function setAdaptationLignes(next){ setAdaptationLignesRaw(next); setDirty(true); }
+  function setObjectifsAdaptation(next){ setObjectifsAdaptationRaw(next); setDirty(true); }
+  function setEnrichissementAccess(next){ setEnrichissementAccessRaw(next); setDirty(true); }
   // Réinitialiser, c'est revenir au contenu du FICHIER, pas au vide : le plan de vente est donc
   // reconstruit depuis l'import (colonnes vente + échéancier de cessions), comme à l'ouverture.
-  function resetSimulation(){ setSimOperationsRaw(data.operations.map((o)=>Object.assign({},o))); setBudgetLignesRaw([]); setOffreNouvelleLgtRaw({}); setPlanVenteLignesRaw(buildPlanVenteInitial(data.residences, data.cessionsParResCode)); setObjectifsVenteRaw({}); setVentesRealiseesRaw({}); setCriteresVenteConfigRaw(null); setFinanceSeuilsRaw({}); setCustomPivotViewsRaw([]); setIncludeIdentifiees(true); setDirty(false); }
+  function resetSimulation(){ setSimOperationsRaw(data.operations.map((o)=>Object.assign({},o))); setBudgetLignesRaw([]); setOffreNouvelleLgtRaw({}); setPlanVenteLignesRaw(buildPlanVenteInitial(data.residences, data.cessionsParResCode)); setObjectifsVenteRaw({}); setVentesRealiseesRaw({}); setCriteresVenteConfigRaw(null); setFinanceSeuilsRaw({}); setCustomPivotViewsRaw([]); setAccessibiliteConfigRaw(null); setAdaptationLignesRaw([]); setObjectifsAdaptationRaw({}); setEnrichissementAccessRaw({}); setIncludeIdentifiees(true); setDirty(false); }
 
   async function doSaveCurrent(name, asNew){
     // idbGet (comme idbPut) rejette désormais si la session a expiré (12h) : englobé dans le même
@@ -6497,6 +6760,7 @@ function App({currentUser, onLogout}){
         ventesSimulees: planVenteToLegacyVentes(planVenteLignes),
         planVenteLignes, objectifsVente, ventesRealisees, criteresVenteConfig,
         includeIdentifiees, financeSeuils, customPivotViews,
+        accessibiliteConfig, adaptationLignes, objectifsAdaptation, enrichissementAccess,
         estBase: existing? existing.estBase : false,
         dateCreation: existing? existing.dateCreation : undefined,
       });
@@ -6569,6 +6833,11 @@ function App({currentUser, onLogout}){
   const filteredOperations = simOperations.filter((o)=>o.resCode===null || filteredCodes.has(o.resCode));
   const hasCarto = data.residences.some((r)=>r.adresse && String(r.adresse).trim());
   const hasFinance = data.residences.some((r)=>r.crd!==null || r.autofinancement!==null || r.vnc!==null);
+  // V9 §0.3 — condition minimale : la colonne PMR doit exister ET porter au moins une valeur. Les
+  // autres critères sont facultatifs, chacun absent étant simplement retiré du score (et de son
+  // dénominateur), jamais compté zéro. Calculé sur le parc entier, pas sur le parc filtré : un filtre
+  // transverse ne doit pas faire disparaître un onglet.
+  const hasAccessibilite = data.residences.some((r)=>r.accessibilitePMR!==null && r.accessibilitePMR!==undefined);
   const hasCompare = savesCount>=2 || !!baseImport;
 
   return (
@@ -6602,7 +6871,7 @@ function App({currentUser, onLogout}){
 
 
         <FilterBar residences={data.residences} filters={filters} setFilters={setFilters} />
-        <Nav active={activeTab} setActive={setActiveTab} hasFinance={hasFinance} hasCarto={hasCarto} hasCompare={hasCompare} hasAdmin={!!(currentUser && currentUser.isAdmin)} />
+        <Nav active={activeTab} setActive={setActiveTab} hasFinance={hasFinance} hasCarto={hasCarto} hasCompare={hasCompare} hasAdmin={!!(currentUser && currentUser.isAdmin)} hasAccessibilite={hasAccessibilite} />
       </div>
 
       <div style={{flex:1}}>
@@ -6661,6 +6930,13 @@ function App({currentUser, onLogout}){
               const horsFiltre = planVenteLignes.filter((v)=>v.resCode!==null && !filteredCodes.has(v.resCode));
               setPlanVenteLignes(horsFiltre.concat(next));
             }}
+          />
+        )}
+        {activeTab==='accessibilite' && (
+          <ViewAccessibilite
+            residences={filteredResidences}
+            accessibiliteConfig={accessibiliteConfig}
+            echelles={data.accessibiliteEchelles || {}}
           />
         )}
         {activeTab==='pivot' && <ViewPivot residences={filteredResidences} operations={filteredOperations} onSelectResidence={setSelectedResidence} customPivotViews={customPivotViews} setCustomPivotViews={setCustomPivotViews} />}
