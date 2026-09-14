@@ -5449,7 +5449,7 @@ const CANAUX_VENTE = [
   { cle:'logements', label:'Logements vendus', unite:'logements', pas:1,    aide:"Nombre de logements dont la cession est visée dans l'année" },
   { cle:'produit',   label:'Produit de cession', unite:'€',        pas:1000, aide:"Produit net de cession visé dans l'année" },
 ];
-function ViewVente({residences, operations, planVenteLignes, setPlanVenteLignes, objectifsVente, setObjectifsVente}){
+function ViewVente({residences, operations, planVenteLignes, setPlanVenteLignes, objectifsVente, setObjectifsVente, ventesRealisees, setVentesRealisees}){
   const resByCode = useMemo(()=>{ const m={}; residences.forEach((r)=>m[r.code]=r); return m; }, [residences]);
   const typeVenteSuggestions = useMemo(()=>uniqueSorted(residences.map((r)=>r.typeVente)), [residences]);
   const lignesAjoutees = useMemo(()=>planVenteLignes.filter((l)=>l.origine==='ajout'), [planVenteLignes]);
@@ -5474,8 +5474,23 @@ function ViewVente({residences, operations, planVenteLignes, setPlanVenteLignes,
     });
     return out;
   }, [planVenteLignes]);
+  // Le réalisé ne se saisit que sur les exercices clos : même convention de coupure que les séries
+  // « Actuel » du reste de l'outil (anneeCoupureActuel), et non l'année civile en cours, dont le bilan
+  // n'est pas encore fait.
+  const coupureActuel = useMemo(()=>anneeCoupureActuel(), []);
+  const anneesRealise = anneesVente.filter((y)=>y<=coupureActuel);
+  // Ce qui fait foi par année : le réalisé sur un exercice clos où il a été saisi, le plan daté sinon.
+  // C'est la lecture qu'attend un bilan de mi-parcours — comparer un objectif passé à un plan plutôt
+  // qu'à ce qui a réellement été vendu n'aurait aucun sens.
+  function reference(y){
+    const r = (ventesRealisees||{})[y];
+    if (y<=coupureActuel && r && (Number(r.logements)||0)>0) return { valeur:Number(r.logements)||0, source:'réalisé' };
+    return { valeur:(planParAnnee[y]||{}).logements||0, source:'planifié' };
+  }
   const totalObjLgt = anneesVente.reduce((s,y)=>s+(Number((objectifsVente[y]||{}).logements)||0), 0);
   const totalPlanLgt = anneesVente.reduce((s,y)=>s+((planParAnnee[y]||{}).logements||0), 0);
+  const totalRealiseLgt = anneesRealise.reduce((s,y)=>s+(Number(((ventesRealisees||{})[y]||{}).logements)||0), 0);
+  const totalReference = anneesVente.reduce((s,y)=>s+reference(y).valeur, 0);
 
   function addVente(){
     if (!residences.length) return;
@@ -5577,7 +5592,20 @@ function ViewVente({residences, operations, planVenteLignes, setPlanVenteLignes,
         </p>
         <SaisieObjectifsAnnuels annees={anneesVente} canaux={CANAUX_VENTE} valeurs={objectifsVente}
           setValeurs={setObjectifsVente} titre="Objectif annuel" />
-        <div style={{overflowX:'auto',marginTop:10}}>
+
+        <h3 style={{fontSize:'.8rem',fontWeight:700,color:'var(--ce-vert-tres-fonce)',margin:'16px 0 4px'}}>Ventes réalisées</h3>
+        <p style={{fontSize:'.72rem',color:'var(--ce-vert-fonce)',marginBottom:10,lineHeight:1.5}}>
+          Saisie limitée aux exercices clos — jusqu'à {coupureActuel} — sur la même convention de coupure
+          que les séries « Actuel » du reste de l'outil : le bilan de l'année en cours n'est pas fait.
+        </p>
+        {anneesRealise.length===0 ? (
+          <p style={{fontSize:'.75rem',color:'#9fb3ae'}}>Aucun exercice clos dans la période couverte par ce fichier.</p>
+        ) : (
+          <SaisieObjectifsAnnuels annees={anneesRealise} canaux={CANAUX_VENTE} valeurs={ventesRealisees||{}}
+            setValeurs={setVentesRealisees} titre="Réalisé" />
+        )}
+
+        <div style={{overflowX:'auto',marginTop:16}}>
           <table className="ce-table ce-table-dense">
             <tbody>
               <tr>
@@ -5590,21 +5618,30 @@ function ViewVente({residences, operations, planVenteLignes, setPlanVenteLignes,
                 <td style={{position:'sticky',left:0,background:'#fff',zIndex:1,fontWeight:600,whiteSpace:'nowrap'}}>Écart à l'objectif</td>
                 {anneesVente.map((y)=>{
                   const o = Number((objectifsVente[y]||{}).logements)||0;
-                  const p = (planParAnnee[y]||{}).logements||0;
                   if (!o) return <td key={y} style={{textAlign:'right',color:'#cfdbd7'}}>—</td>;
-                  const d = p-o;
-                  return <td key={y} style={{textAlign:'right',fontWeight:700,fontVariantNumeric:'tabular-nums',
-                    color: d>=0? 'var(--ce-vert-principal)':'var(--ce-corail)'}}>{d>=0?'+':''}{fmtNum(d)}</td>;
+                  const ref = reference(y);
+                  const d = ref.valeur-o;
+                  return <td key={y} title={'Comparé au '+ref.source+' : '+fmtNum(ref.valeur)+' pour un objectif de '+fmtNum(o)}
+                    style={{textAlign:'right',fontWeight:700,fontVariantNumeric:'tabular-nums',
+                      color: d>=0? 'var(--ce-vert-principal)':'var(--ce-corail)'}}>
+                    {d>=0?'+':''}{fmtNum(d)}{ref.source==='réalisé'? '*' : ''}
+                  </td>;
                 })}
               </tr>
             </tbody>
           </table>
         </div>
+        <p style={{fontSize:'.68rem',color:'var(--ce-vert-fonce)',marginTop:6}}>
+          L'écart se mesure sur le <b>réalisé</b> pour les exercices clos où il a été saisi (marqués d'une
+          astérisque), sur le <b>plan daté</b> pour les autres : comparer un objectif passé à un plan
+          plutôt qu'à ce qui a réellement été vendu n'aurait pas de sens.
+        </p>
         {totalObjLgt>0 && (
-          <p style={{fontSize:'.72rem',color:'var(--ce-vert-fonce)',marginTop:10}}>
-            Sur l'ensemble de la période : {fmtNum(totalPlanLgt)} logements datés au plan de vente pour
-            un objectif de {fmtNum(totalObjLgt)} — <b style={{color: totalPlanLgt>=totalObjLgt? 'var(--ce-vert-principal)':'var(--ce-corail)'}}>
-              {totalPlanLgt-totalObjLgt>=0?'+':''}{fmtNum(totalPlanLgt-totalObjLgt)} logements
+          <p style={{fontSize:'.72rem',color:'var(--ce-vert-fonce)',marginTop:8}}>
+            Sur l'ensemble de la période : {fmtNum(totalReference)} logements retenus
+            {totalRealiseLgt>0 && <span> (dont {fmtNum(totalRealiseLgt)} déjà vendus)</span>} pour un
+            objectif de {fmtNum(totalObjLgt)} — <b style={{color: totalReference>=totalObjLgt? 'var(--ce-vert-principal)':'var(--ce-corail)'}}>
+              {totalReference-totalObjLgt>=0?'+':''}{fmtNum(totalReference-totalObjLgt)} logements
             </b>.
           </p>
         )}
@@ -8366,6 +8403,8 @@ function App({currentUser, onLogout}){
             }}
             objectifsVente={objectifsVente}
             setObjectifsVente={setObjectifsVente}
+            ventesRealisees={ventesRealisees}
+            setVentesRealisees={setVentesRealisees}
           />
         )}
         {activeTab==='accessibilite' && (
