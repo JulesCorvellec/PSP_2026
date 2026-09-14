@@ -6540,6 +6540,165 @@ function ResidenceDrawer({residence, operations, residences, onClose, gainsGrid,
    bandeau de conformité tant que le Checkpoint 1 n'est pas validé — les blocs de diagnostic, la
    matrice de ciblage et le plan d'adaptation arrivent aux phases 2 à 5. */
 const ACCESS_BANDE_COULEURS = { bonne:'#009261', moyenne:'#58D88B', faible:'#FF8364' };
+/* Lecture stratégique de la matrice (§3.2) : c'est le libellé d'orientation qui transforme un
+   croisement en outil de décision. Les quatre coins sont ceux de la spécification ; les cinq cases
+   intermédiaires en découlent par continuité. Ce sont des ORIENTATIONS PROPOSÉES, pas des verdicts —
+   formulées comme telles ici et rappelées sous la grille. */
+const ORIENTATIONS_MATRICE = {
+  'fort|faible':    { court:'Cible prioritaire',        long:"Cible prioritaire d'adaptation", fort:true },
+  'fort|moyenne':   { court:'Priorité élevée',          long:"Adaptation à étudier — priorité élevée" },
+  'fort|bonne':     { court:'Déjà adapté',              long:"Parc déjà adapté — à valoriser en attribution", fort:true },
+  'moyen|faible':   { court:'À anticiper',              long:"Adaptation à anticiper" },
+  'moyen|moyenne':  { court:'Au cas par cas',           long:"À examiner au cas par cas" },
+  'moyen|bonne':    { court:'Sans enjeu immédiat',      long:"Parc adapté — sans enjeu immédiat" },
+  'faible|faible':  { court:'Non prioritaire',          long:"Non prioritaire, sauf réhabilitation déjà programmée", fort:true },
+  'faible|moyenne': { court:'Non prioritaire',          long:"Non prioritaire" },
+  'faible|bonne':   { court:'Réserve de mutation',      long:"Réserve de mutation pour les locataires âgés des résidences inadaptées", fort:true },
+};
+function AccessibiliteMatrice({lignes, bandes, unite, operations, includeIdentifiees, onSelectResidence}){
+  const [affichage, setAffichage] = useState('effectif'); // 'effectif' | 'orientation'
+  const [cellule, setCellule] = useState(null);           // {tranche, bande}
+  const [voirNonClassables, setVoirNonClassables] = useState(false);
+
+  const ordreBandes = ['faible','moyenne','bonne'];
+  const bandeLabel = (cle)=> (bandes.find((b)=>b.cle===cle) || ACCESS_BANDS_DEFAUT.find((b)=>b.cle===cle)).label;
+  const classables = lignes.filter((l)=>l.score!==null && l.tranche);
+  const nonClassables = lignes.filter((l)=>l.score===null || !l.tranche);
+  const taille = (arr)=> unite==='logements'? arr.reduce((s,l)=>s+(l.r.nbLgt||0),0) : arr.length;
+
+  const grille = TRANCHES_VIEILLISSEMENT.map((t)=>({
+    tranche: t,
+    cases: ordreBandes.map((bcle)=>{
+      const membres = classables.filter((l)=>l.tranche.cle===t.cle && l.bande.cle===bcle);
+      return { bcle, membres, valeur: taille(membres),
+        counters: cellCounters(membres.map((l)=>l.r), operations||[], includeIdentifiees),
+        orientation: ORIENTATIONS_MATRICE[t.cle+'|'+bcle] };
+    }),
+  }));
+  const maxCase = Math.max(1, ...grille.reduce((acc,r)=>acc.concat(r.cases.map((c)=>c.valeur)), []));
+  const membresCellule = cellule ? (grille.find((r)=>r.tranche.cle===cellule.tranche).cases.find((c)=>c.bcle===cellule.bande).membres) : null;
+  const caseCellule = cellule ? grille.find((r)=>r.tranche.cle===cellule.tranche).cases.find((c)=>c.bcle===cellule.bande) : null;
+  // Contrôle de la checklist §10 : la somme des neuf cases plus les non classables doit redonner le
+  // parc filtré, à l'unité près. Affiché, pas seulement vérifié en test.
+  const totalGrille = grille.reduce((s,r)=>s+r.cases.reduce((s2,c)=>s2+c.membres.length,0), 0);
+
+  return (
+    <div className="ce-card">
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:10,marginBottom:14}}>
+        <h3 style={{fontSize:'.85rem',fontWeight:700,color:'var(--ce-vert-tres-fonce)'}}>Matrice de ciblage — Accessibilité × Vieillissement</h3>
+        <div style={{display:'flex',gap:6}}>
+          <button className={affichage==='effectif'?'ce-btn ce-btn-sm':'ce-btn-outline ce-btn-sm'} onClick={()=>setAffichage('effectif')}>Effectif</button>
+          <button className={affichage==='orientation'?'ce-btn ce-btn-sm':'ce-btn-outline ce-btn-sm'} onClick={()=>setAffichage('orientation')}>Orientation</button>
+        </div>
+      </div>
+
+      <div style={{display:'flex',gap:20,flexWrap:'wrap',alignItems:'flex-start'}}>
+        <div style={{display:'flex',gap:8}}>
+          <div style={{display:'flex',alignItems:'center',justifyContent:'center',writingMode:'vertical-rl',transform:'rotate(180deg)',fontSize:'.72rem',fontWeight:700,color:'var(--ce-vert-fonce)',padding:'4px 0'}}>Vieillissement</div>
+          <div>
+            <div style={{display:'grid',gridTemplateColumns:'118px repeat(3, 150px)',gap:4}}>
+              <div></div>
+              {ordreBandes.map((b)=>(
+                <div key={b} style={{textAlign:'center',fontSize:'.68rem',fontWeight:700,color:'var(--ce-vert-fonce)'}}>{bandeLabel(b)}</div>
+              ))}
+              {grille.map((row)=>(
+                <React.Fragment key={row.tranche.cle}>
+                  <div title={row.tranche.label} style={{display:'flex',alignItems:'center',fontSize:'.68rem',fontWeight:700,color:'var(--ce-vert-fonce)'}}>{row.tranche.court}</div>
+                  {row.cases.map((c)=>{
+                    const alpha = 0.1 + 0.8*(c.valeur/maxCase);
+                    const actif = cellule && cellule.tranche===row.tranche.cle && cellule.bande===c.bcle;
+                    const clair = alpha>0.5;
+                    const compteurs = [
+                      c.counters.rehab>0 && ('Réhab '+fmtNum(c.counters.rehab)),
+                      c.counters.demolition>0 && ('Démol '+fmtNum(c.counters.demolition)),
+                      c.counters.vente>0 && ('Vente '+fmtNum(c.counters.vente)),
+                    ].filter(Boolean);
+                    return (
+                      <div key={c.bcle}
+                        title={c.orientation.long}
+                        onClick={()=>setCellule((cur)=> (cur && cur.tranche===row.tranche.cle && cur.bande===c.bcle)? null : {tranche:row.tranche.cle, bande:c.bcle})}
+                        style={{height:106,borderRadius:8,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:2,padding:'4px 5px',
+                          background: c.valeur>0? 'rgba(0,146,97,'+alpha.toFixed(2)+')' : '#f5f8f7',
+                          border: actif? '2px solid var(--ce-vert-tres-fonce)' : '1px solid #eef4f2',
+                          cursor:'pointer', transition:'border .1s'}}>
+                        {affichage==='effectif' ? (
+                          <React.Fragment>
+                            <span style={{fontSize:'1.05rem',fontWeight:700,color: clair? '#fff':'var(--ce-vert-tres-fonce)'}}>{fmtNum(c.valeur)}</span>
+                            <span style={{fontSize:'.63rem',color: clair? '#fff':'var(--ce-vert-fonce)'}}>{c.membres.length} résidence{c.membres.length>1?'s':''}</span>
+                            {compteurs.length>0 && <span style={{fontSize:'.58rem',lineHeight:1.25,textAlign:'center',color: clair? '#fff':'var(--ce-vert-fonce)'}}>{compteurs.join(' · ')}</span>}
+                          </React.Fragment>
+                        ) : (
+                          <React.Fragment>
+                            <span style={{fontSize:'.72rem',fontWeight:700,lineHeight:1.25,textAlign:'center',color: clair? '#fff':'var(--ce-vert-tres-fonce)'}}>{c.orientation.court}</span>
+                            <span style={{fontSize:'.63rem',color: clair? '#fff':'var(--ce-vert-fonce)'}}>{fmtNum(c.valeur)} {unite==='logements'?'lgt':'rés.'}</span>
+                          </React.Fragment>
+                        )}
+                      </div>
+                    );
+                  })}
+                </React.Fragment>
+              ))}
+            </div>
+            <div style={{textAlign:'center',fontSize:'.72rem',fontWeight:700,color:'var(--ce-vert-fonce)',marginTop:6}}>Accessibilité</div>
+          </div>
+        </div>
+
+        <div style={{flex:1,minWidth:240}}>
+          {!cellule && (
+            <div style={{border:'1px solid #eef4f2',borderRadius:8,padding:'10px 14px',maxHeight:330,overflowY:'auto',fontSize:'.78rem',color:'#9fb3ae'}}>
+              Cliquez sur une case pour voir les résidences concernées et l'orientation proposée.
+            </div>
+          )}
+          {cellule && (
+            <ResidenceListPanel
+              title={caseCellule.orientation.long+' — '+membresCellule.length+' résidence'+(membresCellule.length>1?'s':'')}
+              rows={membresCellule} maxHeight={330} marginTop={0}
+              onClose={()=>setCellule(null)}
+              renderRow={(l)=>(
+                <div onClick={()=>onSelectResidence && onSelectResidence(l.r)}
+                  style={{display:'flex',justifyContent:'space-between',gap:8,fontSize:'.76rem',color:'var(--ce-vert-fonce)',padding:'3px 0',borderBottom:'1px solid #f0f5f3',cursor:onSelectResidence?'pointer':'default'}}>
+                  <span>{l.r.nom || l.r.code}</span>
+                  <span style={{color:'#9fb3ae',flexShrink:0}}>score {fmtDec(l.score,0)} · {fmtNum(l.r.nbLgt)} lgt</span>
+                </div>
+              )}
+            />
+          )}
+        </div>
+      </div>
+
+      <p style={{fontSize:'.7rem',color:'var(--ce-vert-fonce)',marginTop:12,lineHeight:1.5}}>
+        Les libellés d'orientation sont des <b>propositions de lecture, pas des verdicts</b> : ils
+        désignent ce que le croisement suggère d'examiner, pas une décision. L'axe vertical suit le
+        barème du classeur, où « Vieillissement » est le taux de locataires de plus de 65 ans et où la
+        tranche la plus âgée est la moins bien notée — une note basse signale donc un parc vieillissant.
+      </p>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8,marginTop:8}}>
+        <span style={{fontSize:'.72rem',color: nonClassables.length? 'var(--ce-corail)':'var(--ce-vert-fonce)',fontWeight: nonClassables.length?700:400}}>
+          {fmtNum(totalGrille)} résidences classées + {fmtNum(nonClassables.length)} non classable{nonClassables.length>1?'s':''} = {fmtNum(lignes.length)} du parc filtré
+        </span>
+        {nonClassables.length>0 && (
+          <button className="ce-btn-outline ce-btn-sm" onClick={()=>setVoirNonClassables((v)=>!v)}>
+            {voirNonClassables? 'Masquer' : 'Voir les non classables'}
+          </button>
+        )}
+      </div>
+      {voirNonClassables && nonClassables.length>0 && (
+        <ResidenceListPanel
+          title={"Sans score d'accessibilité ou sans vieillissement renseigné"}
+          rows={nonClassables} maxHeight={240}
+          onClose={()=>setVoirNonClassables(false)}
+          renderRow={(l)=>(
+            <div onClick={()=>onSelectResidence && onSelectResidence(l.r)}
+              style={{display:'flex',justifyContent:'space-between',gap:8,fontSize:'.76rem',color:'var(--ce-vert-fonce)',padding:'3px 0',borderBottom:'1px solid #f0f5f3',cursor:onSelectResidence?'pointer':'default'}}>
+              <span>{l.r.nom || l.r.code}</span>
+              <span style={{color:'#9fb3ae',flexShrink:0}}>{l.score===null? 'aucun critère renseigné' : 'vieillissement non renseigné'}</span>
+            </div>
+          )}
+        />
+      )}
+    </div>
+  );
+}
 // Bornes de périodes de construction : la coupure 2005 est la seule qui ne soit pas conventionnelle —
 // c'est celle de la loi 2005-102, dont on cherche précisément à objectiver l'effet sur l'accessibilité.
 const ACCESS_PERIODES = [
@@ -6549,7 +6708,7 @@ const ACCESS_PERIODES = [
   { label:'2000 - 2004',   min:2000,      max:2005 },
   { label:'2005 et après', min:2005,      max:Infinity },
 ];
-function ViewAccessibilite({residences, accessibiliteConfig, setAccessibiliteConfig, echelles, onSelectResidence}){
+function ViewAccessibilite({residences, operations, includeIdentifiees, accessibiliteConfig, setAccessibiliteConfig, echelles, onSelectResidence}){
   const poids = (accessibiliteConfig && accessibiliteConfig.poids) || ACCESSIBILITE_POIDS_DEFAUT;
   const bandes = (accessibiliteConfig && accessibiliteConfig.bandes) || ACCESS_BANDS_DEFAUT;
   const [unite, setUnite] = useState('logements');   // 'logements' | 'residences'
@@ -6810,6 +6969,12 @@ function ViewAccessibilite({residences, accessibiliteConfig, setAccessibiliteCon
             plugins:{ legend:{display:false}, tooltip:{ callbacks:{ label:(ctx)=>'Score moyen '+fmtDec(parPeriode[ctx.dataIndex].moyenne,1)+' · '+fmtNum(parPeriode[ctx.dataIndex].n)+' résidences' } } } }} />
         )}
       </div>
+
+      {/* ------- Matrice de ciblage (§3) ------- */}
+      {!sansVieillissement && (
+        <AccessibiliteMatrice lignes={lignes} bandes={bandes} unite={unite}
+          operations={operations} includeIdentifiees={includeIdentifiees} onSelectResidence={onSelectResidence} />
+      )}
 
       {/* ------- Table ------- */}
       <div className="ce-card">
@@ -7178,6 +7343,8 @@ function App({currentUser, onLogout}){
         {activeTab==='accessibilite' && (
           <ViewAccessibilite
             residences={filteredResidences}
+            operations={filteredOperations}
+            includeIdentifiees={includeIdentifiees}
             accessibiliteConfig={accessibiliteConfig}
             setAccessibiliteConfig={setAccessibiliteConfig}
             echelles={data.accessibiliteEchelles || {}}
