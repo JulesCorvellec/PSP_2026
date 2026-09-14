@@ -3687,6 +3687,10 @@ function emptyImpactCells(){
 // reste de l'outil (computeTrajectoryByResidence pour le DPE, computeTechniqueProjection pour l'État
 // technique), jamais recalculées différemment entre Actuel et Cible — seule l'échéance change (cf.
 // §2.1 de la spec, filterOpsUntil()).
+/* V9 §7 — AUCUN impact de l'adaptation ici, et c'est délibéré : adapter un logement ne modifie ni la
+   note d'état technique, ni la classe DPE. Rien ne doit donc être propagé depuis le plan d'adaptation
+   dans cette fonction. Le préciser explicitement pour qu'une session ultérieure ne prenne pas cette
+   absence pour un oubli et ne la « corrige » pas. */
 function computeImpactCellsForEcheance(residences, operations, gainsGrid, echeance, includeIdentifiees, offreNouvelleLgt){
   const opsJusquaEcheance = filterOpsUntil(operations, echeance);
   const trajE = computeTrajectoryByResidence(residences, operations, gainsGrid||{}, echeance, 'energie', includeIdentifiees);
@@ -4223,7 +4227,7 @@ function scoreStatusColor(value){
   if (value<75) return STATUS_COLORS.warning;
   return STATUS_COLORS.good;
 }
-function ViewCarto({residences, allResidences, onSelectResidence}){
+function ViewCarto({residences, allResidences, onSelectResidence, hasAccessibilite}){
   const [colorMode, setColorMode] = useState('attractivite');
   const {coords, progress, status} = useGeocoding(allResidences);
 
@@ -4239,6 +4243,9 @@ function ViewCarto({residences, allResidences, onSelectResidence}){
     const c = coords[r.code];
     let color;
     if (colorMode==='dpe') color = DPE_COLORS[String(r.dpeEnergie||'').toUpperCase()] || DPE_COLORS.NR;
+    // V9 §7 — l'accessibilité est un score composite sur 0-100, pas une note brute du fichier : elle
+    // passe par la même échelle de statut que les autres notes, pour rester lisible d'un mode à l'autre.
+    else if (colorMode==='accessibilite') color = scoreStatusColor(scoreAccessibilite(r, ACCESSIBILITE_POIDS_DEFAUT).score);
     else if (colorMode==='technique') color = scoreStatusColor(r.technique);
     else color = scoreStatusColor(r.attractivite);
     return {res:r, lat:c.lat, lon:c.lon, color};
@@ -4264,6 +4271,7 @@ function ViewCarto({residences, allResidences, onSelectResidence}){
               <option value="attractivite">Attractivité</option>
               <option value="technique">État technique</option>
               <option value="dpe">DPE énergie</option>
+              {hasAccessibilite && <option value="accessibilite">Accessibilité</option>}
             </select>
           </div>
           <div className="carto-legend">
@@ -5739,12 +5747,25 @@ function ViewPivot({residences, operations, onSelectResidence, customPivotViews,
     {key:'familleTechnique', label:'Famille état technique', get:(r)=>r.familleTechnique? ('Famille '+r.familleTechnique):'Non renseignée'},
     {key:'dpeEnergie', label:'DPE Énergie', get:(r)=>r.dpeEnergie||'Non renseigné'},
     {key:'dpeGES', label:'DPE GES', get:(r)=>r.dpeGES||'Non renseigné'},
+    // V9 §7 — la BANDE d'accessibilité est croisable comme dimension ; le score lui-même figure en
+    // mesure plus bas. Les bornes sont celles par défaut : le pivot n'a pas accès à accessibiliteConfig,
+    // et une dimension dont les modalités changeraient selon un réglage d'un autre onglet serait
+    // ingérable dans une vue personnalisée sauvegardée.
+    {key:'bandeAccessibilite', label:"Palier d'accessibilité", get:(r)=>{
+      const b = bandeAccessibilite(scoreAccessibilite(r, ACCESSIBILITE_POIDS_DEFAUT).score, ACCESS_BANDS_DEFAUT);
+      return b? b.label : 'Non cotée';
+    }},
+    {key:'trancheVieillissement', label:'Vieillissement', get:(r)=>{
+      const t = trancheVieillissement(r.vieillissement);
+      return t? t.court : 'Non renseigné';
+    }},
   ], []);
   const RESIDENCE_METRICS = useMemo(()=>[
     {key:'nbLgt_sum', label:'Nombre de logements', agg:'sum', get:(r)=>r.nbLgt||0, fmt:fmtNum},
     {key:'count', label:'Nombre de résidences', agg:'count', fmt:fmtNum},
     {key:'attractivite_avg', label:'Attractivité moyenne', agg:'avg', get:(r)=>r.attractivite, fmt:(v)=>v!==null?v.toFixed(1):'—'},
     {key:'technique_avg', label:'État technique moyen', agg:'avg', get:(r)=>r.technique, fmt:(v)=>v!==null?v.toFixed(1):'—'},
+    {key:'accessibilite_avg', label:"Score d'accessibilité moyen", agg:'avg', get:(r)=>scoreAccessibilite(r, ACCESSIBILITE_POIDS_DEFAUT).score, fmt:(v)=>v!==null?v.toFixed(1):'—'},
     {key:'crd_sum', label:'CRD total', agg:'sum', get:(r)=>r.crd||0, fmt:fmtEur},
     {key:'autofinancement_sum', label:'Autofinancement total', agg:'sum', get:(r)=>r.autofinancement||0, fmt:fmtEur},
     {key:'vnc_sum', label:'VNC totale', agg:'sum', get:(r)=>r.vnc||0, fmt:fmtEur},
@@ -6357,8 +6378,114 @@ function ViewComparatif({currentSnapshot}){
   );
 }
 
+/* V9 §7 et §6 — bloc « Accessibilité & adaptabilité » de la fiche résidence, et couche
+   d'enrichissement manuel. Le radar « Programme » de la fiche porte déjà certains sous-critères : on
+   ne les duplique pas, on ajoute le score composite, la tranche de vieillissement, l'appartenance au
+   plan d'adaptation, puis les champs de terrain.
+
+   Ces champs saisis à la main n'entrent JAMAIS dans le score composite, qui doit rester entièrement
+   dérivé du fichier importé : un score dépendant de saisies manuelles ne serait plus comparable d'une
+   version à l'autre, ni d'un bailleur à l'autre. Ils alimentent l'affichage et un futur affinage.
+   Le stockage est indexé par resCode, forme d'atterrissage naturelle d'un futur export GET
+   (Get&Share), qui est précisément l'outil de collecte terrain de ce type d'information — la forme
+   est prévue, le connecteur n'est pas codé. */
+const CHAMPS_ENRICHISSEMENT = [
+  { cle:'ascenseur', label:'Ascenseur', type:'choix', options:['Non renseigné','Oui','Non','Partiel'] },
+  { cle:'niveaux', label:'Nombre de niveaux', type:'entier' },
+  { cle:'logementsRdc', label:'Logements en rez-de-chaussée', type:'entier', borneNbLgt:true },
+  { cle:'logementsAdaptes', label:'Logements déjà adaptés', type:'entier', borneNbLgt:true },
+  { cle:'commentaire', label:'Commentaire terrain', type:'texte' },
+];
+function FicheAccessibilite({residence, operations, includeIdentifiees, adaptationLignes, enrichissementAccess, setEnrichissementAccess}){
+  const s = scoreAccessibilite(residence, ACCESSIBILITE_POIDS_DEFAUT);
+  const criteres = CRITERES_ACCESSIBILITE.filter((c)=>residence[c.cle]!==null && residence[c.cle]!==undefined);
+  const tranche = trancheVieillissement(residence.vieillissement);
+  const retenue = (adaptationLignes||[]).find((a)=>a.resCode===residence.code) || null;
+  // Même règle d'affectation que l'onglet Accessibilité : l'appartenance à la liste A ou B se relit
+  // ici, elle ne se stocke pas — sinon elle se désynchroniserait dès qu'une opération change.
+  const opsRes = (operations||[]).filter((o)=>o.resCode===residence.code && (includeIdentifiees || o.statut!=='identifie'));
+  const aReha = opsRes.some((o)=>familyOfType(o.type)==='Réhabilitation');
+  const listeInfo = retenue ? listeAdaptation({ reha_programmee:{ actif:aReha } }, retenue.listeForcee) : null;
+  const saisie = (enrichissementAccess||{})[residence.code] || {};
+  if (s.score===null && !criteres.length && !tranche) return null;
+
+  function maj(cle, valeur){
+    const n = Object.assign({}, enrichissementAccess||{});
+    const e = Object.assign({}, n[residence.code]||{});
+    if (valeur===null || valeur===undefined || valeur==='' || valeur==='Non renseigné') delete e[cle]; else e[cle] = valeur;
+    if (Object.keys(e).length) n[residence.code] = e; else delete n[residence.code];
+    setEnrichissementAccess(n);
+  }
+  const bande = bandeAccessibilite(s.score, ACCESS_BANDS_DEFAUT);
+
+  return (
+    <div style={{marginTop:14}}>
+      <h4 style={{fontSize:'.72rem',fontWeight:700,marginBottom:6,color:'var(--ce-vert-fonce)',textTransform:'uppercase'}}>Accessibilité & adaptabilité</h4>
+      <div style={{display:'flex',gap:16,flexWrap:'wrap',fontSize:'.78rem',color:'var(--ce-vert-fonce)',marginBottom:10}}>
+        <div><b>Score :</b> {s.score===null? '—' : <span style={{color: bande? ACCESS_BANDE_COULEURS[bande.cle] : 'inherit',fontWeight:700}}>{fmtDec(s.score,0)}{bande? ' · '+bande.label : ''}</span>}
+          {s.score!==null && s.couverture<0.5 && <span title={'Critères manquants : '+s.manquants.map(libelleChampAccessibilite).join(', ')} style={{marginLeft:4,color:'var(--ce-corail)'}}>⚠ partiel</span>}</div>
+        <div><b>Vieillissement :</b> {tranche? <span title={tranche.label}>{tranche.court}</span> : '—'}</div>
+        <div><b>Plan d'adaptation :</b> {listeInfo
+          ? <span style={{color:'var(--ce-vert-principal)',fontWeight:700}} title={listeInfo.liste==='A'? 'Adaptation intégrée à une réhabilitation' : 'Adaptation en diffus'}>
+              retenue — liste {listeInfo.liste}{listeInfo.forcee? ' (forcée)' : ''}
+            </span>
+          : 'non retenue'}</div>
+      </div>
+      {criteres.length>0 && (
+        <table className="ce-table" style={{marginBottom:10}}>
+          <thead><tr><th>Sous-critère</th><th style={{textAlign:'right'}}>Note</th></tr></thead>
+          <tbody>
+            {criteres.map((c)=>(
+              <tr key={c.cle}>
+                <td>{c.label}</td>
+                <td style={{textAlign:'right'}}>
+                  <span style={{display:'inline-block',width:90,height:8,background:'#eef4f2',borderRadius:4,marginRight:6,verticalAlign:'middle'}}>
+                    <span style={{display:'block',width:Math.max(2,Math.min(100,residence[c.cle]))+'%',height:8,borderRadius:4,
+                      background:(bandeAccessibilite(residence[c.cle], ACCESS_BANDS_DEFAUT)||{}).cle? ACCESS_BANDE_COULEURS[bandeAccessibilite(residence[c.cle], ACCESS_BANDS_DEFAUT).cle] : '#9fb3ae'}}></span>
+                  </span>
+                  {fmtDec(residence[c.cle],0)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      <div style={{border:'1px dashed #cfdbd7',borderRadius:8,padding:'10px 12px'}}>
+        <div style={{fontSize:'.68rem',fontWeight:700,color:'var(--ce-vert-fonce)',textTransform:'uppercase',marginBottom:8}}>
+          Enrichissement terrain <span style={{fontWeight:400,textTransform:'none'}} title="Ces champs n'entrent pas dans le score composite, qui doit rester entièrement dérivé du fichier importé">(hors score)</span>
+        </div>
+        <div style={{display:'flex',flexWrap:'wrap',gap:10}}>
+          {CHAMPS_ENRICHISSEMENT.map((c)=>(
+            <div key={c.cle} style={{display:'flex',flexDirection:'column',gap:3,minWidth: c.type==='texte'? '100%' : 170}}>
+              <label style={{fontSize:'.64rem',fontWeight:700,color:'var(--ce-vert-fonce)'}}>{c.label}</label>
+              {c.type==='choix' ? (
+                <select className="ce-select" value={saisie[c.cle] || 'Non renseigné'} onChange={(e)=>maj(c.cle, e.target.value)}>
+                  {c.options.map((o)=><option key={o} value={o}>{o}</option>)}
+                </select>
+              ) : c.type==='texte' ? (
+                <textarea className="ce-select" rows={2} style={{resize:'vertical'}} value={saisie[c.cle] || ''}
+                  onChange={(e)=>maj(c.cle, e.target.value)} />
+              ) : (
+                <input className="ce-select" type="number" min="0" step="1"
+                  max={c.borneNbLgt && residence.nbLgt>0? residence.nbLgt : undefined}
+                  title={c.borneNbLgt? 'Borné par le nombre de logements de la résidence ('+fmtNum(residence.nbLgt)+')' : ''}
+                  value={saisie[c.cle] ?? ''} onChange={(e)=>{
+                    if (e.target.value==='') return maj(c.cle, null);
+                    let v = Math.max(0, Number(e.target.value)||0);
+                    if (c.borneNbLgt && residence.nbLgt>0) v = Math.min(v, residence.nbLgt);
+                    maj(c.cle, v);
+                  }} />
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ---------------- Fiche résidence (drill-down) ---------------- */
-function ResidenceDrawer({residence, operations, residences, onClose, gainsGrid, hasGainsGrid, includeIdentifiees, baseImport}){
+function ResidenceDrawer({residence, operations, residences, onClose, gainsGrid, hasGainsGrid, includeIdentifiees, baseImport, adaptationLignes, enrichissementAccess, setEnrichissementAccess}){
   const [tab, setTab] = useState('synthese');
   // Les hooks doivent s'exécuter à chaque rendu dans le même ordre : le "return null" pour
   // l'absence de résidence sélectionnée doit donc venir APRÈS tous les hooks, jamais avant
@@ -6459,6 +6586,8 @@ function ResidenceDrawer({residence, operations, residences, onClose, gainsGrid,
                   {residence.tauxVacance!==null && <div><b>Taux de vacance :</b> {residence.tauxVacance}%</div>}
                   {residence.autofinancementLgt!==null && <div><b>Autofinancement / lgt :</b> {fmtEur(residence.autofinancementLgt)}</div>}
                 </div>
+                <FicheAccessibilite residence={residence} operations={operations} includeIdentifiees={includeIdentifiees}
+                  adaptationLignes={adaptationLignes} enrichissementAccess={enrichissementAccess} setEnrichissementAccess={setEnrichissementAccess} />
                 {(residence.distEnergie || residence.distGES) && (
                   <div style={{marginTop:14}}>
                     <h4 style={{fontSize:'.72rem',fontWeight:700,marginBottom:6,color:'var(--ce-vert-fonce)',textTransform:'uppercase'}}>Répartition DPE</h4>
@@ -7049,7 +7178,8 @@ const CANAUX_ADAPTATION = [
   { cle:'diffus', liste:'B', label:'Liste B — en diffus',          aide:"Adaptation isolée, hors réhabilitation" },
 ];
 function AccessibiliteProgrammation({candidats, retenues, operations, accessibiliteConfig, setAccessibiliteConfig,
-    adaptationLignes, setAdaptationLignes, objectifsAdaptation, setObjectifsAdaptation, planVenteLignes, onSelectResidence}){
+    adaptationLignes, setAdaptationLignes, objectifsAdaptation, setObjectifsAdaptation, planVenteLignes,
+    budgetLignes, setBudgetLignes, onSelectResidence}){
   const [uniteGraphe, setUniteGraphe] = useState('logements'); // 'logements' | 'montants'
   const annees = useMemo(()=>computeYearsRange(operations||[]), [operations]);
   const forfaits = (accessibiliteConfig && accessibiliteConfig.forfaits) || {};
@@ -7074,6 +7204,22 @@ function AccessibiliteProgrammation({candidats, retenues, operations, accessibil
   function majEntree(resCode, champ, valeur){
     setAdaptationLignes((adaptationLignes||[]).map((a)=> a.resCode===resCode? Object.assign({}, a, { [champ]: valeur }) : a));
   }
+  /* §7 — injection de l'enveloppe en ligne budgétaire libre. Jamais automatique : le budget
+     d'investissement peut déjà porter l'adaptation, saisie à la main, et une injection silencieuse
+     créerait un double compte invisible. L'identifiant de la ligne est STABLE, si bien qu'une seconde
+     injection remplace la première au lieu de s'y ajouter, et que le retrait est exact. */
+  const ID_LIGNE_ADAPTATION = 'ligne_adaptation_accessibilite';
+  const ligneInjectee = (budgetLignes||[]).find((l)=>l.id===ID_LIGNE_ADAPTATION) || null;
+  function injecterBudget(){
+    const valeurs = {};
+    parAnnee.forEach((a)=>{ const m = a.montantA+a.montantB; if (m>0) valeurs[a.annee] = m; });
+    const ligne = { id:ID_LIGNE_ADAPTATION, nom:"Adaptation du parc (plan d'accessibilité)", valeurs };
+    setBudgetLignes(ligneInjectee
+      ? (budgetLignes||[]).map((l)=> l.id===ID_LIGNE_ADAPTATION? ligne : l)
+      : (budgetLignes||[]).concat([ligne]));
+  }
+  function retirerBudget(){ setBudgetLignes((budgetLignes||[]).filter((l)=>l.id!==ID_LIGNE_ADAPTATION)); }
+
   function majForfait(liste, v){
     const n = Object.assign({}, forfaits); const num = v===''? null : Math.max(0, Number(v)||0);
     if (num===null) delete n[liste]; else n[liste] = num;
@@ -7177,6 +7323,18 @@ function AccessibiliteProgrammation({candidats, retenues, operations, accessibil
                   ))}
                 </tbody>
               </table>
+            </div>
+            <div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap',marginTop:10}}>
+              <button className="ce-btn ce-btn-sm" disabled={!forfaitsSaisis || totalMontant<=0} onClick={injecterBudget}
+                title={forfaitsSaisis? "Crée (ou met à jour) une ligne budgétaire libre dans Investissements & Entretien du parc" : "Saisissez un forfait par logement"}>
+                {ligneInjectee? "Mettre à jour la ligne budgétaire" : "Injecter l'enveloppe en ligne budgétaire"}
+              </button>
+              {ligneInjectee && <button className="ce-btn-outline ce-btn-sm" onClick={retirerBudget}>Retirer la ligne</button>}
+              <span style={{fontSize:'.7rem',color:'var(--ce-vert-fonce)'}}>
+                {ligneInjectee
+                  ? "Ligne « Adaptation du parc » présente dans Investissements & Entretien du parc — la réinjecter la remplace, elle ne s'ajoute pas."
+                  : "Jamais automatique : votre budget d'investissement porte peut-être déjà l'adaptation, saisie à la main."}
+              </span>
             </div>
             {(sansAnnee.length>0 || desynchronises.length>0) && (
               <p style={{fontSize:'.7rem',color:'var(--ce-corail)',marginTop:8,lineHeight:1.5}}>
@@ -7283,7 +7441,7 @@ function AccessibiliteProgrammation({candidats, retenues, operations, accessibil
     </React.Fragment>
   );
 }
-function ViewAccessibilite({residences, operations, includeIdentifiees, planVenteLignes, adaptationLignes, setAdaptationLignes, objectifsAdaptation, setObjectifsAdaptation, accessibiliteConfig, setAccessibiliteConfig, echelles, onSelectResidence}){
+function ViewAccessibilite({residences, operations, includeIdentifiees, planVenteLignes, adaptationLignes, setAdaptationLignes, objectifsAdaptation, setObjectifsAdaptation, budgetLignes, setBudgetLignes, accessibiliteConfig, setAccessibiliteConfig, echelles, onSelectResidence}){
   const poids = (accessibiliteConfig && accessibiliteConfig.poids) || ACCESSIBILITE_POIDS_DEFAUT;
   const bandes = (accessibiliteConfig && accessibiliteConfig.bandes) || ACCESS_BANDS_DEFAUT;
   const [unite, setUnite] = useState('logements');   // 'logements' | 'residences'
@@ -7588,7 +7746,7 @@ function ViewAccessibilite({residences, operations, includeIdentifiees, planVent
         accessibiliteConfig={accessibiliteConfig} setAccessibiliteConfig={setAccessibiliteConfig}
         adaptationLignes={adaptationLignes} setAdaptationLignes={setAdaptationLignes}
         objectifsAdaptation={objectifsAdaptation} setObjectifsAdaptation={setObjectifsAdaptation}
-        planVenteLignes={planVenteLignes} onSelectResidence={onSelectResidence} />
+        planVenteLignes={planVenteLignes} budgetLignes={budgetLignes} setBudgetLignes={setBudgetLignes} onSelectResidence={onSelectResidence} />
 
       {/* ------- Table ------- */}
       <div className="ce-card">
@@ -7964,6 +8122,8 @@ function App({currentUser, onLogout}){
             setAdaptationLignes={setAdaptationLignes}
             objectifsAdaptation={objectifsAdaptation}
             setObjectifsAdaptation={setObjectifsAdaptation}
+            budgetLignes={budgetLignes}
+            setBudgetLignes={setBudgetLignes}
             accessibiliteConfig={accessibiliteConfig}
             setAccessibiliteConfig={setAccessibiliteConfig}
             echelles={data.accessibiliteEchelles || {}}
@@ -7971,7 +8131,7 @@ function App({currentUser, onLogout}){
           />
         )}
         {activeTab==='pivot' && <ViewPivot residences={filteredResidences} operations={filteredOperations} onSelectResidence={setSelectedResidence} customPivotViews={customPivotViews} setCustomPivotViews={setCustomPivotViews} />}
-        {activeTab==='carto' && <ViewCarto residences={filteredResidences} allResidences={data.residences} onSelectResidence={setSelectedResidence} />}
+        {activeTab==='carto' && <ViewCarto residences={filteredResidences} allResidences={data.residences} onSelectResidence={setSelectedResidence} hasAccessibilite={hasAccessibilite} />}
         {activeTab==='compare' && (
           <ViewComparatif currentSnapshot={currentSnapshot} />
         )}
@@ -7979,7 +8139,7 @@ function App({currentUser, onLogout}){
       </div>
 
       <div className="ce-footer">Cellance - Confidentiel</div>
-      <ResidenceDrawer residence={selectedResidence} operations={simOperations} residences={filteredResidences} onClose={()=>setSelectedResidence(null)} gainsGrid={data.gainsGrid} hasGainsGrid={data.hasGainsGrid} includeIdentifiees={includeIdentifiees} baseImport={baseImportFiltered} />
+      <ResidenceDrawer residence={selectedResidence} operations={simOperations} residences={filteredResidences} onClose={()=>setSelectedResidence(null)} gainsGrid={data.gainsGrid} hasGainsGrid={data.hasGainsGrid} includeIdentifiees={includeIdentifiees} baseImport={baseImportFiltered} adaptationLignes={adaptationLignes} enrichissementAccess={enrichissementAccess} setEnrichissementAccess={setEnrichissementAccess} />
     </div>
   );
 }
