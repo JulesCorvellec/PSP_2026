@@ -2033,6 +2033,18 @@ function ChartCanvas({type, data, options, height, plugins}){
     }, options||{}), plugins: plugins||[]});
     return ()=>{ if (chartRef.current) chartRef.current.destroy(); };
   }, [JSON.stringify(data), JSON.stringify(options), type, plugins]);
+  // JSON.stringify ne sérialise pas les fonctions : l'effet ci-dessus ne voit donc JAMAIS un
+  // changement de `onClick`, et le graphique conserve le gestionnaire — donc la clôture — du rendu où
+  // il a été créé. Le problème reste invisible tant que l'état lu par le gestionnaire fait aussi
+  // bouger les données du graphique, ce qui le recrée ; il apparaît dès qu'un état influe sur ce que
+  // le clic affiche sans influer sur la courbe. Constaté le 2026-09-14 sur la trajectoire cumulée du
+  // plan d'adaptation : saisir un forfait change les coûts listés au clic, pas les volumes tracés, et
+  // le panneau continuait d'afficher des résidences sans coût. On réassigne donc les gestionnaires à
+  // chaque rendu, sans recréer le graphique (ce qui perdrait l'animation et le survol en cours).
+  useEffect(()=>{
+    if (!chartRef.current) return;
+    chartRef.current.options.onClick = (options||{}).onClick;
+  });
   return <div style={{height: height||280}}><canvas ref={canvasRef}></canvas></div>;
 }
 
@@ -7307,6 +7319,12 @@ function AccessibiliteProgrammation({candidats, retenues, operations, accessibil
     adaptationLignes, setAdaptationLignes, objectifsAdaptation, setObjectifsAdaptation, planVenteLignes,
     budgetLignes, setBudgetLignes, onSelectResidence}){
   const [uniteGraphe, setUniteGraphe] = useState('logements'); // 'logements' | 'montants'
+  // Même convention de panneau que le diagnostic et la Vue d'ensemble : un clic ouvre la liste, un
+  // second sur la même valeur la referme.
+  const [chartPanel, setChartPanel] = useState(null); // {chart, value, title, rows}
+  function toggleChartPanel(chart, value, data){
+    setChartPanel((cur)=> (cur && cur.chart===chart && cur.value===value) ? null : Object.assign({chart, value}, data));
+  }
   const annees = useMemo(()=>computeYearsRange(operations||[]), [operations]);
   const forfaits = (accessibiliteConfig && accessibiliteConfig.forfaits) || {};
   const forfaitsSaisis = CANAUX_ADAPTATION.some((c)=>forfaits[c.liste]>0);
@@ -7381,6 +7399,30 @@ function AccessibiliteProgrammation({candidats, retenues, operations, accessibil
     const o = a.objectifA+a.objectifB, p = a.planifieA+a.planifieB;
     return o>0? (p-o)/o*100 : null;
   });
+
+  // Ligne de liste des panneaux de programmation : c'est le triplet année / volume / coût qui compte
+  // ici, pas la note d'accessibilité — on est passé du diagnostic à la programmation.
+  function ligneProgrammee(p){
+    return (
+      <div key={p.r.code} onClick={()=>onSelectResidence && onSelectResidence(p.r)}
+        style={{display:'flex',justifyContent:'space-between',gap:8,fontSize:'.76rem',color:'var(--ce-vert-fonce)',padding:'3px 0',borderBottom:'1px solid #f0f5f3',cursor:onSelectResidence?'pointer':'default'}}>
+        <span>{p.r.nom || p.r.code}<span style={{color:'#9fb3ae'}}> · liste {p.listeInfo.liste}</span></span>
+        <span style={{color:'#9fb3ae',flexShrink:0}}>
+          {p.annee!==null && p.annee!==undefined? p.annee : 'année à renseigner'} · {fmtNum(p.logements)} lgt
+          {p.cout!==null? ' · '+fmtEur(p.cout) : ''}
+        </span>
+      </div>
+    );
+  }
+  // Un clic sur une barre ouvre les résidences programmées cette année-là, restreintes à la liste
+  // cliquée ; un clic sur le point d'objectif — qui n'est porté par aucune résidence — ouvre les deux
+  // listes de l'année, pour que la comparaison objectif / planifié reste lisible au même endroit.
+  function ouvrirAnnee(annee, liste){
+    const rows = programme.filter((p)=>p.annee===annee && (!liste || p.listeInfo.liste===liste));
+    const suffixe = liste? ' — liste '+liste : '';
+    toggleChartPanel('annee', annee+'|'+(liste||'tout'),
+      { title:annee+suffixe+' — '+rows.length+' résidence'+(rows.length>1?'s':''), rows });
+  }
 
   // §5.3 — réserve de mutation : croisement vieillissement faible × accessibilité bonne.
   const auPlanVente = {};
@@ -7504,12 +7546,21 @@ function AccessibiliteProgrammation({candidats, retenues, operations, accessibil
                 // d'adaptation est une bonne nouvelle, rester en dessous ne l'est pas.
                 plugins:{ ...(uniteGraphe==='logements'? { ceEcartLabels:{ datasetIndex:0, values:ecartPct, colorPos:'#009261', colorNeg:'#FF8364' } } : {}),
                   tooltip:{ callbacks:{ label:(ctx)=> ctx.dataset.label+' : '+(uniteGraphe==='montants'? fmtEur(ctx.raw) : fmtNum(ctx.raw)+' lgt') } } },
+                onClick:(evt,elements)=>{
+                  if (!elements.length) return;
+                  const el = elements[0];
+                  // Datasets : 0 = liste A, 1 = liste B, 2 = la courbe d'objectif (absente en montants).
+                  const liste = el.datasetIndex===0? 'A' : el.datasetIndex===1? 'B' : null;
+                  ouvrirAnnee(annees[el.index], liste);
+                },
               }} />
             )}
+            {chartPanel && chartPanel.chart==='annee' && <ResidenceListPanel title={chartPanel.title} rows={chartPanel.rows} renderRow={ligneProgrammee} onClose={()=>setChartPanel(null)} maxHeight={240} />}
             <p style={{fontSize:'.7rem',color:'var(--ce-vert-fonce)',marginTop:10,lineHeight:1.5}}>
               Barres empilées par canal, courbe d'objectif tous canaux confondus, et écart annuel en %
-              sous chaque barre. Les résidences sans année d'adaptation n'apparaissent dans aucun
-              exercice — elles sont décomptées au-dessus plutôt que réparties arbitrairement.
+              sous chaque barre. Un clic sur une barre ouvre les résidences programmées cette année-là.
+              Les résidences sans année d'adaptation n'apparaissent dans aucun exercice — elles sont
+              décomptées au-dessus plutôt que réparties arbitrairement.
             </p>
           </div>
 
@@ -7521,7 +7572,18 @@ function AccessibiliteProgrammation({candidats, retenues, operations, accessibil
                 { label:'Planifié cumulé', data: cumul('planifie'), borderColor:'#009261', backgroundColor:'#009261', pointRadius:2, tension:.2 },
                 { label:'Objectif cumulé', data: cumul('objectif'), borderColor:'#264E46', backgroundColor:'#264E46', borderDash:[5,4], pointRadius:2, tension:.2 },
               ]
-            }} options={{ scales:{ y:{ beginAtZero:true, title:{display:true,text:'Logements cumulés'} } } }} />
+            }} options={{ scales:{ y:{ beginAtZero:true, title:{display:true,text:'Logements cumulés'} } },
+              onClick:(evt,elements)=>{
+                if (!elements.length) return;
+                const el = elements[0];
+                // La courbe d'objectif n'est portée par aucune résidence : seul le planifié ouvre une
+                // liste, et elle est CUMULÉE — toutes les résidences programmées jusqu'à cette année.
+                if (el.datasetIndex!==0) return;
+                const y = annees[el.index];
+                const rows = programme.filter((p)=>p.annee!==null && p.annee!==undefined && p.annee<=y);
+                toggleChartPanel('cumul', y, { title:"Programmé jusqu'en "+y+' — '+rows.length+' résidence'+(rows.length>1?'s':''), rows });
+              } }} />
+            {chartPanel && chartPanel.chart==='cumul' && <ResidenceListPanel title={chartPanel.title} rows={chartPanel.rows} renderRow={ligneProgrammee} onClose={()=>setChartPanel(null)} maxHeight={240} />}
             {totalObjectif>0 && (
               <p style={{fontSize:'.72rem',color:'var(--ce-vert-fonce)',marginTop:10}}>
                 Delta en fin de trajectoire : <b style={{color: totalPlanifie>=totalObjectif? 'var(--ce-vert-principal)':'var(--ce-corail)'}}>
